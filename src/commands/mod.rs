@@ -24,6 +24,10 @@ where
             session::echo(&command.args, output)?;
             Ok(CommandAction::Continue)
         }
+        "pwd" => {
+            session::pwd(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
         _ => {
             writeln!(errors, "Command '{}' not found", command.name)?;
             Ok(CommandAction::Continue)
