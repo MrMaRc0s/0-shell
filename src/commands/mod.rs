@@ -1,3 +1,5 @@
+mod session;
+
 use std::io::{self, Write};
 
 use crate::parser::ParsedCommand;
@@ -10,13 +12,21 @@ pub enum CommandAction {
 
 pub fn dispatch<W, E>(
     command: &ParsedCommand,
-    _output: &mut W,
+    output: &mut W,
     errors: &mut E,
 ) -> io::Result<CommandAction>
 where
     W: Write,
     E: Write,
 {
-    writeln!(errors, "Command '{}' not found", command.name)?;
-    Ok(CommandAction::Continue)
+    match command.name.as_str() {
+        "echo" => {
+            session::echo(&command.args, output)?;
+            Ok(CommandAction::Continue)
+        }
+        _ => {
+            writeln!(errors, "Command '{}' not found", command.name)?;
+            Ok(CommandAction::Continue)
+        }
+    }
 }

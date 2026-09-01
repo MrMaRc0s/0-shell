@@ -74,4 +74,19 @@ mod tests {
             "Command 'missing' not found\nCommand 'missing' not found\n"
         );
     }
+
+    #[test]
+    fn echo_handles_quoted_and_unquoted_arguments() {
+        let mut input = Cursor::new(b"echo \"something!\"\necho something else\n".to_vec());
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        run_with_io(&mut input, &mut output, &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "$ something!\n$ something else\n$ \n"
+        );
+        assert!(errors.is_empty());
+    }
 }
