@@ -28,6 +28,10 @@ where
             session::pwd(&command.args, output, errors)?;
             Ok(CommandAction::Continue)
         }
+        "cd" => {
+            session::cd(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
         _ => {
             writeln!(errors, "Command '{}' not found", command.name)?;
             Ok(CommandAction::Continue)
