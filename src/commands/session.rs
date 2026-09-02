@@ -4,6 +4,8 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use super::CommandAction;
+
 pub fn echo<W>(args: &[String], output: &mut W) -> io::Result<()>
 where
     W: Write,
@@ -63,6 +65,18 @@ where
     Ok(())
 }
 
+pub fn exit<E>(args: &[String], errors: &mut E) -> io::Result<CommandAction>
+where
+    E: Write,
+{
+    if args.is_empty() {
+        Ok(CommandAction::Exit)
+    } else {
+        writeln!(errors, "exit: too many arguments")?;
+        Ok(CommandAction::Continue)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -70,7 +84,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use super::{change_directory, echo, pwd};
+    use super::{change_directory, echo, exit, pwd};
+    use crate::commands::CommandAction;
 
     static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
 
@@ -172,6 +187,29 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             "cd: HOME not set\ncd: too many arguments\n"
+        );
+    }
+
+    #[test]
+    fn exit_requests_that_the_shell_stops() {
+        let mut errors = Vec::new();
+
+        let action = exit(&[], &mut errors).unwrap();
+
+        assert_eq!(action, CommandAction::Exit);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn exit_with_arguments_reports_an_error_and_continues() {
+        let mut errors = Vec::new();
+
+        let action = exit(&["unexpected".to_string()], &mut errors).unwrap();
+
+        assert_eq!(action, CommandAction::Continue);
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "exit: too many arguments\n"
         );
     }
 }

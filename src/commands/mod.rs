@@ -32,6 +32,7 @@ where
             session::cd(&command.args, errors)?;
             Ok(CommandAction::Continue)
         }
+        "exit" => session::exit(&command.args, errors),
         _ => {
             writeln!(errors, "Command '{}' not found", command.name)?;
             Ok(CommandAction::Continue)

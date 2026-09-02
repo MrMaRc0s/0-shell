@@ -89,4 +89,16 @@ mod tests {
         );
         assert!(errors.is_empty());
     }
+
+    #[test]
+    fn exit_stops_before_later_commands_are_read() {
+        let mut input = Cursor::new(b"echo before\nexit\necho after\n".to_vec());
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        run_with_io(&mut input, &mut output, &mut errors).unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), "$ before\n$ ");
+        assert!(errors.is_empty());
+    }
 }
