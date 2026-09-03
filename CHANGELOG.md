@@ -22,9 +22,44 @@ Format: `Task # - Action - Quick Summary`
   the project docs from git.
 
 - **No task - Removed em-dashes - Replaced the last en-dash in `Tasks.md` and recorded the rule.**
-  `tasks 4–9` became `tasks 4-9`. Repo now scans clean for both `—` and `–`.
+  The last en-dash range in `Tasks.md` became a plain `tasks 4-9`. The repo, this file
+  included, now scans clean for both dash characters (U+2014 and U+2013). Recorded as a
+  standing preference so it survives into later sessions.
+
+### Phase 2 - Filesystem commands
+
+- **Task 4 - Implemented `mkdir` - Creates each operand, reports failures, keeps going.**
+  `fs::create_dir` per operand, `report::missing_operand` when given none, and
+  `mkdir: cannot create directory '<path>': <reason>` on failure. A failed operand does not
+  stop the rest, so `mkdir first absent/child last` still creates `first` and `last`.
+  Verified the audit scenario end to end through the built binary: `new_folder1`,
+  `new_folder2`, then `parent` with `child1` and `child2`, followed by `cd parent` and `pwd`.
+  Dropped the `TODO(task 4-9)` attributes from `quoted` and `missing_operand`, which now have
+  real callers.
+  Not implemented: `-p`. The subject does not require it and the audit does not exercise it,
+  so `mkdir -p x` creates a directory literally named `-p` alongside `x`.
+
+- **Task 16 (partial) - Added the temp-directory test fixture - `filesystem/testing.rs`.**
+  Built early because task 4's tests needed it and copying the same setup into six command
+  files would be worse. `TempDir::new(label)` makes a uniquely named directory under the
+  system temp directory and removes it recursively on drop. Tests address it with absolute
+  paths through `TempDir::arg` instead of changing the working directory, since the working
+  directory is process-wide and the harness runs tests in parallel.
 
 ### Phase 1 - Filesystem module scaffolding
+
+- **Task 3 - Added the shared report helper - `src/commands/report.rs`, with 7 tests.**
+  Placed at `commands/` level rather than inside `filesystem/`, because `cd` and `pwd` in
+  `session.rs` leaked the same errno suffix and a helper buried in `filesystem/` could not
+  reach them. Provides `reason` (strips ` (os error N)`), `quoted`, `message`, `detail`,
+  `io_error`, `missing_operand`, `missing_file_operand`, `missing_destination_operand`.
+  Fixed the two existing convention violations: `cd /nonexistent` now prints
+  `cd: /nonexistent: No such file or directory`, matching bash exactly instead of appending
+  `(os error 2)`; `pwd` routes through `reason` too.
+  Four helpers with no caller yet were given a `TODO(task 4-9)` `#[allow(dead_code)]`, since
+  test-only callers do not satisfy `dead_code` in a non-test build. Each attribute is deleted
+  by the task that first calls the helper; two remain, on `missing_file_operand` and
+  `missing_destination_operand`, waiting for `cp` and `mv`.
 
 - **Task 1 - Created the filesystem module tree - Six command files, wired into the dispatcher.**
   Added `src/commands/filesystem/` with `mod.rs` plus `mkdir.rs`, `cat.rs`, `cp.rs`, `mv.rs`,
@@ -53,7 +88,14 @@ Format: `Task # - Action - Quick Summary`
   verified locally. Noted that `session.rs:62` currently leaks the `(os error 2)` suffix in
   `cd`, the one existing violation, to be fixed with the task 3 helper.
 
+## Current state
+
+Done: tasks 1, 2, 3, 4, 25, and task 16 in part. Task 14 was absorbed into task 1.
+Next: task 5 (`cat`), then 6 (`cp`), 7 (`mv`), 8 (`rm`), and 9 through 13 (`ls`).
+The five filesystem commands other than `mkdir` (`cat`, `cp`, `mv`, `rm`, `ls`) are still
+stubs reporting `<name>: not implemented yet`.
+
 ## Verification
 
 Every entry above was left with `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
-warning-free, and 18/18 tests passing.
+warning-free, and every test passing (31 as of task 4).

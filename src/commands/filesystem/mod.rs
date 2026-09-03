@@ -69,6 +69,9 @@ mod mkdir;
 mod mv;
 mod rm;
 
+#[cfg(test)]
+mod testing;
+
 pub use cat::cat;
 pub use cp::cp;
 pub use ls::ls;

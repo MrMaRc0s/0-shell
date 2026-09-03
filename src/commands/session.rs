@@ -5,6 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::CommandAction;
+use super::report;
 
 pub fn echo<W>(args: &[String], output: &mut W) -> io::Result<()>
 where
@@ -28,7 +29,7 @@ where
             output.write_all(path.as_os_str().as_bytes())?;
             output.write_all(b"\n")
         }
-        Err(error) => writeln!(errors, "pwd: {error}"),
+        Err(error) => report::message("pwd", &report::reason(&error), errors),
     }
 }
 
@@ -59,7 +60,8 @@ where
     };
 
     if let Err(error) = env::set_current_dir(&target) {
-        writeln!(errors, "cd: {}: {error}", Path::new(&target).display())?;
+        let path = Path::new(&target).display().to_string();
+        report::io_error("cd", &path, &error, errors)?;
     }
 
     Ok(())

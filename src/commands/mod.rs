@@ -1,4 +1,5 @@
 mod filesystem;
+mod report;
 mod session;
 
 use std::io::{self, Write};
