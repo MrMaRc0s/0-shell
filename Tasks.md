@@ -28,7 +28,7 @@ each invent their own format.
 
 ### 3. Add a shared path/argument helper
 A small helper for "no operands given" (`mkdir: missing operand`) and for turning an
-`io::Error` into a Unix-style message, so tasks 4–9 don't each duplicate it.
+`io::Error` into a Unix-style message, so tasks 4-9 don't each duplicate it.
 
 ---
 
