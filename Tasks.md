@@ -1,4 +1,4 @@
-# 0-Shell — Remaining Tasks
+# 0-Shell - Remaining Tasks
 
 Status snapshot (as of commit `854dad2`):
 
@@ -11,12 +11,12 @@ The numbering below is roughly the recommended order.
 
 ---
 
-## Phase 1 — Filesystem module scaffolding
+## Phase 1 - Filesystem module scaffolding
 
 ### 1. Create the filesystem module tree
 Add `src/commands/filesystem/mod.rs` and declare `mod filesystem;` in `src/commands/mod.rs`.
 Decide now whether each command gets its own file (`mkdir.rs`, `cat.rs`, `cp.rs`, `mv.rs`,
-`rm.rs`, `ls.rs`) or all live in `mod.rs`. Separate files are recommended — `ls -l` alone is
+`rm.rs`, `ls.rs`) or all live in `mod.rs`. Separate files are recommended - `ls -l` alone is
 large enough to dominate a shared file.
 
 ### 2. Agree on the error-reporting convention
@@ -32,7 +32,7 @@ A small helper for "no operands given" (`mkdir: missing operand`) and for turnin
 
 ---
 
-## Phase 2 — Filesystem commands
+## Phase 2 - Filesystem commands
 
 ### 4. Implement `mkdir`
 - Accept one or more paths; create each with `std::fs::create_dir`.
@@ -42,17 +42,17 @@ A small helper for "no operands given" (`mkdir: missing operand`) and for turnin
 
 ### 5. Implement `cat`
 - Accept one or more files; stream each to the output writer.
-- Write bytes, not `String` — file contents may not be valid UTF-8, and the audit compares
+- Write bytes, not `String` - file contents may not be valid UTF-8, and the audit compares
   output byte-for-byte with the host `cat`.
 - Directory argument must produce `cat: <name>: Is a directory`, not a panic.
 - Audit relevance: *"cat new_folder1/new_doc.txt"* must match the host terminal exactly.
 
 ### 6. Implement `cp`
-- `cp <src> <dst-file>` — copy to a new/overwritten file path.
-- `cp <src> <dst-dir>` — when the destination is an existing directory, copy *into* it
+- `cp <src> <dst-file>` - copy to a new/overwritten file path.
+- `cp <src> <dst-dir>` - when the destination is an existing directory, copy *into* it
   keeping the source's basename. This exact case is the audited one
   (`cp new_folder1/new_doc.txt new_folder2`).
-- `cp <src>... <dst-dir>` — multiple sources into a directory.
+- `cp <src>... <dst-dir>` - multiple sources into a directory.
 - Preserve file permissions where practical; report unreadable sources without crashing.
 - Decide and document whether `cp -r` for directories is in scope (the subject says
   "files and directories as required by normal Unix `cp` behavior"; the audit only exercises
@@ -61,7 +61,7 @@ A small helper for "no operands given" (`mkdir: missing operand`) and for turnin
 ### 7. Implement `mv`
 - Rename within the same filesystem via `std::fs::rename`.
 - Moving *into* an existing directory must keep the basename
-  (`mv new_folder2 new_folder1` → `new_folder1/new_folder2`) — this is the audited case.
+  (`mv new_folder2 new_folder1` → `new_folder1/new_folder2`) - this is the audited case.
 - Handle the cross-device case: `rename` fails with `EXDEV`, so fall back to copy-then-delete
   (reuse the `cp` and `rm` internals rather than duplicating them).
 - Works for both files and directories.
@@ -76,7 +76,7 @@ A small helper for "no operands given" (`mkdir: missing operand`) and for turnin
   deletes something unexpected.
 - Audit relevance: *"rm -r new_folder1"*.
 
-### 9. Implement `ls` — plain listing
+### 9. Implement `ls` - plain listing
 - Read the directory with `std::fs::read_dir`, hide dotfiles by default, sort entries by name.
 - Support a file argument (prints the name), a directory argument (prints its contents), and
   multiple arguments (headers `name:` between blocks, matching Unix).
@@ -91,25 +91,25 @@ Include `.` and `..` and dotfiles in the listing.
 Append the type indicator: `/` directories, `*` executables, `@` symlinks, `|` FIFOs,
 `=` sockets.
 
-### 12. Implement `ls -l` — the long format
+### 12. Implement `ls -l` - the long format
 The largest single task in the project. Each line needs:
 - File type character + permission bits rendered as `drwxr-xr-x` (from
   `std::os::unix::fs::PermissionsExt::mode`).
 - Hard link count, from `MetadataExt::nlink`.
 - **Owner and group names.** There is no libc dependency in `Cargo.toml`, so `uid`/`gid`
   must be resolved by parsing `/etc/passwd` and `/etc/group` yourself, falling back to the
-  numeric id when no entry matches. Decide this early — it's the one part of `ls -l` that
+  numeric id when no entry matches. Decide this early - it's the one part of `ls -l` that
   isn't a straight std-library call.
 - Size (and `major, minor` for device files, as in the subject's `/dev` example).
 - Modification time formatted like Unix: `Mon DD HH:MM` for recent files, `Mon DD  YYYY` for
   files older than ~6 months. Requires converting `MetadataExt::mtime` (Unix epoch seconds)
-  into a civil date/time yourself — a date algorithm, since there is no `chrono` dependency.
+  into a civil date/time yourself - a date algorithm, since there is no `chrono` dependency.
 - The `total <blocks>` header line, summed from `MetadataExt::blocks() / 2`.
 - Column alignment: each field is right-padded to the widest value in the listing.
 - Symlinks shown as `name -> target`.
 
 ### 13. Make `ls` flags combinable
-`ls -l -a -F`, `ls -laF`, and `ls -al` must all work — the audit runs `ls -l -a -F`
+`ls -l -a -F`, `ls -laF`, and `ls -al` must all work - the audit runs `ls -l -a -F`
 explicitly. Parse clustered short flags, and reject unknown flags with
 `ls: invalid option -- 'x'` rather than treating them as filenames.
 
@@ -119,7 +119,7 @@ This is PLAN.md's stated integration point between Developer A and Developer B.
 
 ---
 
-## Phase 3 — Tests
+## Phase 3 - Tests
 
 ### 15. Unit tests for each filesystem command
 Follow the existing style in `session.rs`: pass `Vec<u8>` writers, assert on output and error
@@ -138,10 +138,10 @@ One test that drives `run_with_io` with the audit's full script:
 
 ---
 
-## Phase 4 — Integration and audit rehearsal
+## Phase 4 - Integration and audit rehearsal
 
 ### 18. Run the full check suite
-`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` — all clean.
+`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` - all clean.
 
 ### 19. Verify no external binaries are spawned
 Grep the source for `std::process`, `Command`, `exec`, `system`. The audit asks this
@@ -181,7 +181,7 @@ ones.
 
 ### 25. Fix `.gitignore`
 The uncommitted change adds `*.md` with only `README.md`, `COMMANDS.md`, and `RESULTS.md`
-re-included — which means `Exercise.md`, `Audit.md`, `PLAN.md`, and this `Tasks.md` are now
+re-included - which means `Exercise.md`, `Audit.md`, `PLAN.md`, and this `Tasks.md` are now
 ignored, and `COMMANDS.md`/`RESULTS.md` don't exist yet. Also line 3 of the change
 (`  Ignore all text and markdown files...`) is missing its `#`, so git reads it as a pattern.
 Decide what actually belongs in the repo and rewrite the file before committing.

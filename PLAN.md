@@ -2,7 +2,7 @@
 
 The work is divided by behavior and source-file ownership so both developers can work on separate branches without repeatedly editing the same files. Git and team communication will handle the final integration.
 
-## Developer A — shell core and session commands
+## Developer A - shell core and session commands
 
 Owned files:
 
@@ -23,7 +23,7 @@ Tasks:
 
 This is the best part to start first because it creates a runnable shell early and covers the audit's prompt, input, EOF, unknown-command, navigation, and exit checks.
 
-## Developer B — filesystem commands
+## Developer B - filesystem commands
 
 Owned files:
 
@@ -54,6 +54,6 @@ After both parts are complete:
 5. Search the source for external process execution and confirm the shell never invokes another binary.
 6. Update the README so it describes only completed behavior.
 
-## Bonus backlog — not being implemented
+## Bonus backlog - not being implemented
 
 The optional features are Ctrl+C handling, completion, history, a current-directory prompt, colors, command chaining, pipes, redirection, environment-variable expansion, and `help`. They remain documented only and will not be implemented as part of the current project.

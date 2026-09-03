@@ -2,13 +2,13 @@
 
 ### Overview
 
-In this project, you'll build **0-shell**, a minimalist Unix-like shell implemented in **Rust**, designed to run core Unix commands using system calls—without relying on external binaries or built-in shells like `bash` or `sh`.
+In this project, you'll build **0-shell**, a minimalist Unix-like shell implemented in **Rust**, designed to run core Unix commands using system calls-without relying on external binaries or built-in shells like `bash` or `sh`.
 
 Inspired by tools like [BusyBox](https://en.wikipedia.org/wiki/BusyBox), this project introduces you to key concepts in **Unix system programming**, including **process creation**, **command execution**, and **file system interaction**, all while leveraging Rust's safety and abstraction features to avoid manual memory management.
 
 ### Role Play
 
-You are a **system-level developer** assigned to build a lightweight, standalone Unix shell for an embedded Linux environment. Your task is to create a shell that handles basic navigation, file manipulation, and process control—faithfully mimicking essential shell behaviors without relying on existing shell utilities.
+You are a **system-level developer** assigned to build a lightweight, standalone Unix shell for an embedded Linux environment. Your task is to create a shell that handles basic navigation, file manipulation, and process control-faithfully mimicking essential shell behaviors without relying on existing shell utilities.
 
 ### Learning Objectives
 
