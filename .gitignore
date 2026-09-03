@@ -1,2 +1,16 @@
+# Build output
 /target
-/AUDIT_NOTES.md
+
+# Ignore stray text, markdown, and log files...
+*.txt
+*.md
+*.log
+
+# ...except the top-level docs and anything under DOCs/
+!README.md
+!Exercise.md
+!Audit.md
+!Tasks.md
+!PLAN.md
+!Notes.md
+!CHANGELOG.md
