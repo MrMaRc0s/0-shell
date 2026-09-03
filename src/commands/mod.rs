@@ -1,3 +1,4 @@
+mod filesystem;
 mod session;
 
 use std::io::{self, Write};
@@ -33,6 +34,30 @@ where
             Ok(CommandAction::Continue)
         }
         "exit" => session::exit(&command.args, errors),
+        "mkdir" => {
+            filesystem::mkdir(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "cat" => {
+            filesystem::cat(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "cp" => {
+            filesystem::cp(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "mv" => {
+            filesystem::mv(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "rm" => {
+            filesystem::rm(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "ls" => {
+            filesystem::ls(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
         _ => {
             writeln!(errors, "Command '{}' not found", command.name)?;
             Ok(CommandAction::Continue)
