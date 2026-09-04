@@ -51,6 +51,8 @@
 //! Some cases are not `io::Error`s at all and have fixed wording:
 //!
 //! * `rm: cannot remove '<path>': Is a directory` (no `-r` given)
+//! * `rm: refusing to remove '.' or '..' directory: skipping '<path>'`
+//! * `rm: it is dangerous to operate recursively on '<path>'` (the root failsafe)
 //! * `cp: -r not specified; omitting directory '<path>'`
 //! * `cp: target '<dst>': Not a directory` (several sources, one plain target)
 //! * `cp: '<src>' and '<dst>' are the same file`

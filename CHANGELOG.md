@@ -3,6 +3,47 @@
 Actions performed on the 0-shell project, newest first.
 Format: `Task # - Action - Quick Summary`
 
+## 2026-09-05
+
+### Phase 2 - Filesystem commands
+
+- **Task 8 - Implemented `rm` - Files by default, whole trees with `-r`, per-path reporting.**
+  A directory needs `-r` or `-R` and is refused otherwise. Symlinks are unlinked and never
+  followed, in both modes, so `rm dirlink` removes the link and leaves the directory it points
+  at untouched: every stat is an `lstat`, never a `stat`. One failing operand is reported and
+  the rest are still removed. Verified the audit case `rm -r new_folder1` end to end.
+  Wording note for the team: task 8's text in `Tasks.md` shortens the messages to
+  `rm: <name>: Is a directory`, but the host prints
+  `rm: cannot remove '<name>': Is a directory`, which is also what the convention in
+  `filesystem/mod.rs` pinned down back in task 2. The host wins, since the audit compares
+  against a real terminal. `Tasks.md` was written before that convention existed.
+  The recursive walk is hand written rather than `fs::remove_dir_all`, which reports one error
+  for a whole tree and cannot name the path inside it that actually failed. A directory whose
+  contents could not all be removed is not handed to `remove_dir` afterwards: the child's
+  failure is the honest one, and the `Directory not empty` that would follow says the same
+  thing twice. The host behaves the same way, and there is a test for it that skips itself
+  when the process is root, where an unwritable directory refuses nothing.
+  Two failsafes, both matching the host. `.` and `..` as the last component are refused with
+  `rm: refusing to remove '.' or '..' directory: skipping '<path>'`, and a path resolving to
+  the root directory with `rm: it is dangerous to operate recursively on '<path>'`, with the
+  host's `(same as '/')` suffix when it was spelled some other way, such as `//`. The advice
+  to use `--no-preserve-root` is dropped, as with the `Try '<command> --help'` lines, since
+  this shell has no such flag.
+  The failsafes live in a separate `refusal` function returning the message rather than
+  printing it, so the test suite can prove they hold without ever running the removal they
+  exist to prevent. That test earned its keep immediately: the first version of the `.` check
+  used `Path::components`, which normalizes an interior `.` away and reads `dir/.` as plain
+  `dir`. `rm -r <dir>/.`, the spelling most likely to be typed by accident, went straight
+  through and emptied the directory. The check now reads the path text.
+  Also added `-f`, which is not in task 8's list. `rm -rf <dir>` is what a hand types even
+  when the audit script says `rm -r <dir>`, and `invalid option -- 'f'` at that moment costs
+  an audit step. It ignores what is not there, including no operands at all, and changes
+  nothing else: a directory without `-r` is still refused, exactly as on the host.
+  Verified against the host `rm` across 13 cases covering both flags, both failsafes, a
+  symlink to a directory, an unremovable child, a missing operand, and bad options. The error
+  text is identical once the host's `Try 'rm --help'` and `--no-preserve-root` lines are
+  dropped, and the entries surviving in the directory afterwards are identical too.
+
 ## 2026-09-04
 
 ### Phase 2 - Filesystem commands
