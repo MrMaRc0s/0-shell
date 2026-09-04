@@ -25,7 +25,8 @@
 //! | Command | Template |
 //! |---------|----------|
 //! | `cat`   | `cat: <path>: <reason>` |
-//! | `ls`    | `ls: cannot access '<path>': <reason>` |
+//! | `ls`    | `ls: cannot access '<path>': <reason>` (an operand) |
+//! | `ls`    | `ls: cannot open directory '<path>': <reason>` (its contents) |
 //! | `mkdir` | `mkdir: cannot create directory '<path>': <reason>` |
 //! | `rm`    | `rm: cannot remove '<path>': <reason>` |
 //! | `cp`    | `cp: cannot stat '<src>': <reason>` (source side) |

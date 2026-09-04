@@ -7,6 +7,38 @@ Format: `Task # - Action - Quick Summary`
 
 ### Phase 2 - Filesystem commands
 
+- **Task 9 - Implemented `ls` - Plain listing, sorted, dotfiles hidden, Unix operand grouping.**
+  Entries come from `fs::read_dir`, sorted by raw byte value, printed one per line as bytes so
+  a name that is not valid UTF-8 survives. Names are byte strings, not text, and the same rule
+  that governs `cat` governs this.
+  Operands are grouped the way Unix groups them, not in the order they were typed: every file
+  operand first as one block, then a block per directory under a `<name>:` header, blank line
+  between blocks, each group sorted by name. Headers appear only when there is more than one
+  operand, counting the ones that failed, so `ls missing dir` still heads the `dir` block, as
+  on the host. A directory that cannot be read is reported before its header is written, so it
+  leaves no empty block behind. A symlink operand is followed, so `ls dirlink` lists what the
+  link points at.
+  Format decision, recorded in the README as the task asks: one entry per line, always. The
+  real `ls` prints columns to a terminal and one per line when piped, and columns need the
+  terminal width, which only the `TIOCGWINSZ` ioctl can tell us. That needs a C binding, and
+  `Cargo.toml` has no dependencies by the exercise's rules. Printing the fallback form the
+  host tool itself uses beats guessing a width and aligning columns to nothing: an auditor
+  sees the same names in the same order, and `ls | cat` on the host matches exactly.
+  Sort decision: raw byte order. That is what the host tool does here (uutils implements no
+  `LC_COLLATE`) and what GNU `ls` does under `LC_ALL=C`. A GNU `ls` in a collating locale
+  would order mixed case differently, `a.txt apple Banana` against our
+  `Banana a.txt apple`. Noted in the README rather than approximated, since a half-built
+  collation would be wrong in ways nobody could predict.
+  `-a`, `-F`, and `-l` are tasks 10 through 13 and are not accepted yet: `ls -l` reports
+  `ls: invalid option -- 'l'`. Wiring them through `options::parse` now means those tasks add
+  letters to one string and the behavior behind them, and it keeps `-l` from being mistaken
+  for a filename in the meantime.
+  Verified against the host across 11 cases: no operands, one directory, one file, mixed
+  operands, reversed operand order, a missing operand, a symlink to a directory, an empty
+  directory, an unreadable directory alone and beside a readable one, and a file inside a
+  directory. Standard output is byte identical with the host piped, and the error text is
+  identical too.
+
 - **Task 8 - Implemented `rm` - Files by default, whole trees with `-r`, per-path reporting.**
   A directory needs `-r` or `-R` and is refused otherwise. Symlinks are unlinked and never
   followed, in both modes, so `rm dirlink` removes the link and leaves the directory it points

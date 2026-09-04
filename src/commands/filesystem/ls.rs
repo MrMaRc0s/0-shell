@@ -1,13 +1,302 @@
+use std::ffi::OsString;
+use std::fs;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
-/// Lists directory contents, with the `-l`, `-a`, and `-F` options.
+use super::options::{self, Invalid};
+use crate::commands::report;
+
+/// Lists the named directories and files, or the working directory.
 ///
-/// Not implemented yet - see tasks 9 through 13.
+/// Entries are printed one per line, sorted by name, with dotfiles hidden.
+/// Several operands are grouped the way Unix groups them: the files first as
+/// one block, then a block per directory under a `<name>:` header, with a blank
+/// line between blocks. Operands that cannot be reached are reported and the
+/// rest are still listed.
+///
+/// The `-a`, `-F`, and `-l` options belong to tasks 10 through 13 and are not
+/// accepted yet, so `ls -l` reports an invalid option rather than silently
+/// listing something else.
 pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
 where
     W: Write,
     E: Write,
 {
-    let _ = (args, output);
-    writeln!(errors, "ls: not implemented yet")
+    let parsed = match options::parse(args, "") {
+        Ok(parsed) => parsed,
+        Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
+        Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),
+    };
+
+    let working_directory = [".".to_string()];
+    let operands: &[String] = if parsed.operands.is_empty() {
+        &working_directory
+    } else {
+        &parsed.operands
+    };
+
+    // Operands are sorted and split before anything is printed, because a
+    // listing shows every file operand together and then each directory, in
+    // name order, whatever order they were typed in.
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    for operand in operands {
+        // `metadata` follows symlinks: `ls dirlink` lists the directory the
+        // link points at, as it does in Unix.
+        match Path::new(operand).metadata() {
+            Ok(metadata) if metadata.is_dir() => directories.push(operand),
+            Ok(_) => files.push(operand),
+            Err(error) => {
+                let subject = format!("cannot access {}", report::quoted(operand));
+                report::io_error("ls", &subject, &error, errors)?;
+            }
+        }
+    }
+    files.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    directories.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    // Headers are for telling blocks apart, so one operand needs none, even
+    // when the others failed: `ls missing dir` still heads the `dir` block.
+    let headers = operands.len() > 1;
+    let mut printed = false;
+
+    if !files.is_empty() {
+        for file in files {
+            write_line(file.as_bytes(), output)?;
+        }
+        printed = true;
+    }
+
+    for directory in directories {
+        let names = match read_names(Path::new(directory)) {
+            Ok(names) => names,
+            Err(error) => {
+                // Reported before any header is written, so a directory that
+                // cannot be read leaves no empty block behind.
+                let subject = format!("cannot open directory {}", report::quoted(directory));
+                report::io_error("ls", &subject, &error, errors)?;
+                continue;
+            }
+        };
+
+        if printed {
+            writeln!(output)?;
+        }
+        if headers {
+            output.write_all(directory.as_bytes())?;
+            output.write_all(b":\n")?;
+        }
+        printed = true;
+
+        for name in names {
+            write_line(name.as_bytes(), output)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The visible entries of one directory, in name order.
+fn read_names(directory: &Path) -> io::Result<Vec<OsString>> {
+    let mut names = Vec::new();
+
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        // Dotfiles are hidden until `-a` arrives with task 10.
+        if name.as_bytes().first() == Some(&b'.') {
+            continue;
+        }
+        names.push(name);
+    }
+
+    // Sorted by raw bytes, which is the order `ls` produces under `LC_ALL=C`
+    // and the order the host tool produces here. Names are not text: they are
+    // byte strings that need not be valid UTF-8.
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    Ok(names)
+}
+
+/// Writes one name and a newline, as bytes.
+fn write_line<W>(name: &[u8], output: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    output.write_all(name)?;
+    output.write_all(b"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::ls;
+    use crate::commands::filesystem::testing::TempDir;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn touch(temp: &TempDir, name: &str) -> String {
+        let path = temp.arg(name);
+        fs::write(&path, b"").expect("failed to write the test file");
+        path
+    }
+
+    fn listing<W: AsRef<[String]>>(operands: W) -> (String, String) {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        ls(operands.as_ref(), &mut output, &mut errors).unwrap();
+
+        (
+            String::from_utf8(output).unwrap(),
+            String::from_utf8(errors).unwrap(),
+        )
+    }
+
+    #[test]
+    fn lists_one_entry_per_line_sorted_by_name() {
+        let temp = TempDir::new("ls_sorted");
+        for name in ["Zebra", "apple", "Banana", "_under", "b file", "1num"] {
+            touch(&temp, name);
+        }
+
+        let (output, errors) = listing(vec![temp.arg("")]);
+
+        assert_eq!(output, "1num\nBanana\nZebra\n_under\napple\nb file\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn hides_dotfiles() {
+        let temp = TempDir::new("ls_hidden");
+        touch(&temp, ".hidden");
+        touch(&temp, "visible");
+        fs::create_dir(temp.arg(".hiddendir")).unwrap();
+
+        let (output, errors) = listing(vec![temp.arg("")]);
+
+        assert_eq!(output, "visible\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn prints_the_name_of_a_file_operand() {
+        let temp = TempDir::new("ls_file");
+        let path = touch(&temp, "one.txt");
+
+        let (output, errors) = listing(vec![path.clone()]);
+
+        assert_eq!(output, format!("{path}\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn prints_no_header_for_a_single_directory() {
+        let temp = TempDir::new("ls_single_directory");
+        touch(&temp, "inside.txt");
+
+        let (output, errors) = listing(vec![temp.arg("")]);
+
+        assert_eq!(output, "inside.txt\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn groups_files_first_then_directories_under_headers() {
+        let temp = TempDir::new("ls_groups");
+        let file = touch(&temp, "plain.txt");
+        let first = temp.arg("d1");
+        let second = temp.arg("d2");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        touch(&temp, "d1/inside");
+
+        let (output, errors) = listing(vec![second.clone(), file.clone(), first.clone()]);
+
+        assert_eq!(output, format!("{file}\n\n{first}:\ninside\n\n{second}:\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn lists_an_empty_directory_as_nothing() {
+        let temp = TempDir::new("ls_empty");
+
+        let (output, errors) = listing(vec![temp.arg("")]);
+
+        assert!(output.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn follows_a_symlink_to_a_directory() {
+        let temp = TempDir::new("ls_symlink");
+        let directory = temp.arg("real");
+        fs::create_dir(&directory).unwrap();
+        touch(&temp, "real/inside");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+
+        let (output, errors) = listing(vec![link]);
+
+        assert_eq!(output, "inside\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn reports_an_operand_that_cannot_be_reached_and_lists_the_rest() {
+        let temp = TempDir::new("ls_missing");
+        let missing = temp.arg("nope");
+        let directory = temp.arg("present");
+        fs::create_dir(&directory).unwrap();
+        touch(&temp, "present/inside");
+
+        let (output, errors) = listing(vec![missing.clone(), directory.clone()]);
+
+        // The header stays: it is the second of two operands, whatever became
+        // of the first.
+        assert_eq!(output, format!("{directory}:\ninside\n"));
+        assert_eq!(
+            errors,
+            format!("ls: cannot access '{missing}': No such file or directory\n")
+        );
+    }
+
+    #[test]
+    fn reports_a_directory_it_cannot_open_without_leaving_a_header() {
+        let temp = TempDir::new("ls_unreadable");
+        let locked = temp.arg("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = temp.arg("readable");
+        fs::create_dir(&readable).unwrap();
+        touch(&temp, "readable/inside");
+
+        let (output, errors) = listing(vec![locked.clone(), readable.clone()]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        if errors.is_empty() {
+            // Running as root nothing is unreadable, so there is nothing to test.
+            return;
+        }
+
+        assert_eq!(output, format!("{readable}:\ninside\n"));
+        assert_eq!(
+            errors,
+            format!("ls: cannot open directory '{locked}': Permission denied\n")
+        );
+    }
+
+    #[test]
+    fn rejects_options_that_are_not_implemented_yet() {
+        let (output, errors) = listing(args(&["-l"]));
+        let (_, long) = listing(args(&["--bogus"]));
+
+        assert!(output.is_empty());
+        assert_eq!(errors, "ls: invalid option -- 'l'\n");
+        assert_eq!(long, "ls: unrecognized option '--bogus'\n");
+    }
 }
