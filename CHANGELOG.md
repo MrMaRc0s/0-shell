@@ -3,6 +3,35 @@
 Actions performed on the 0-shell project, newest first.
 Format: `Task # - Action - Quick Summary`
 
+## 2026-09-04
+
+### Phase 2 - Filesystem commands
+
+- **Task 5 - Implemented `cat` - Streams each operand to the output as raw bytes.**
+  `File::open` per operand, then a 64 KiB block copied straight to the output writer, so a
+  large file costs a fixed amount of memory and the bytes are never routed through `String`.
+  A file holding invalid UTF-8 comes out unchanged, and nothing is inserted between operands
+  or after the last one: `cat a b` is exactly the bytes of `a` followed by the bytes of `b`.
+  A directory is caught by checking the metadata of the handle already opened, not by letting
+  the first read fail, because the read error wording varies by platform. The result is
+  `cat: <path>: Is a directory` before any byte of output is written.
+  An unreadable operand is reported and the remaining ones are still printed, so
+  `cat before nope.txt after` prints both `before` and `after`.
+  The internal `Failure` enum splits the two error directions: a failed *read* is a message on
+  `errors` and an `Ok(())`, while a failed *write* to the output is the shell's own stream
+  breaking and propagates as `Err`, which is the case `filesystem`'s convention reserves for
+  it. `io::copy` was rejected for this reason, since its error does not say which side failed.
+  Verified against the host `cat` on the audit case: stdout is byte identical for a text file,
+  a file with no trailing newline, and a binary file, checked with `cmp` and `xxd`.
+  Not implemented: `cat` with no operands. GNU `cat` copies standard input there, which this
+  shell cannot offer, because standard input is the line reader driving the prompt and reading
+  it would swallow the next command. It reports `cat: missing operand` instead.
+  Worth knowing for the audit: this machine's `/usr/bin/cat` is uutils coreutils 0.2.2, not
+  GNU, and uutils appends Rust's errno to the message
+  (`cat: nope.txt: No such file or directory (os error 2)`). Our output keeps the GNU wording
+  without the suffix, per the task 3 decision. The `Is a directory` case, which is the one the
+  audit script names, matches both implementations exactly.
+
 ## 2026-09-03
 
 ### Housekeeping
