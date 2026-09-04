@@ -72,8 +72,6 @@ where
 }
 
 /// Writes `<command>: missing file operand`, used by `cp` and `mv`.
-// TODO(task 4-9): drop this attribute once a command calls it.
-#[allow(dead_code)]
 pub fn missing_file_operand<E>(command: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
@@ -82,8 +80,6 @@ where
 }
 
 /// Writes `<command>: missing destination file operand after '<source>'`.
-// TODO(task 4-9): drop this attribute once a command calls it.
-#[allow(dead_code)]
 pub fn missing_destination_operand<E>(command: &str, source: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
@@ -95,14 +91,30 @@ where
     )
 }
 
+/// Writes `<command>: invalid option -- '<flag>'`.
+pub fn invalid_option<E>(command: &str, flag: char, errors: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    message(command, &format!("invalid option -- '{flag}'"), errors)
+}
+
+/// Writes `<command>: unrecognized option '<option>'`.
+pub fn unrecognized_option<E>(command: &str, option: &str, errors: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    message(command, &format!("unrecognized option '{option}'"), errors)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io;
 
     use super::{
-        detail, io_error, message, missing_destination_operand, missing_file_operand,
-        missing_operand, quoted, reason,
+        detail, invalid_option, io_error, message, missing_destination_operand,
+        missing_file_operand, missing_operand, quoted, reason, unrecognized_option,
     };
 
     fn not_found() -> io::Error {
@@ -179,6 +191,20 @@ mod tests {
             "mkdir: missing operand\n\
              cp: missing file operand\n\
              mv: missing destination file operand after 'source.txt'\n"
+        );
+    }
+
+    #[test]
+    fn option_errors_use_the_getopt_wording() {
+        let mut errors = Vec::new();
+
+        invalid_option("cp", 'q', &mut errors).unwrap();
+        unrecognized_option("cp", "--bogus", &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "cp: invalid option -- 'q'\n\
+             cp: unrecognized option '--bogus'\n"
         );
     }
 }

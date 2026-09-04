@@ -30,6 +30,7 @@
 //! | `rm`    | `rm: cannot remove '<path>': <reason>` |
 //! | `cp`    | `cp: cannot stat '<src>': <reason>` (source side) |
 //! | `cp`    | `cp: cannot create regular file '<dst>': <reason>` (target side) |
+//! | `cp`    | `cp: cannot create directory '<dst>': <reason>` (target side, `-r`) |
 //! | `mv`    | `mv: cannot stat '<src>': <reason>` (source side) |
 //! | `mv`    | `mv: cannot move '<src>' to '<dst>': <reason>` (target side) |
 //!
@@ -47,10 +48,20 @@
 //! * `cp: missing destination file operand after '<src>'`
 //! * `mv: missing destination file operand after '<src>'`
 //!
-//! Two cases are not `io::Error`s at all and have fixed wording:
+//! Some cases are not `io::Error`s at all and have fixed wording:
 //!
 //! * `rm: cannot remove '<path>': Is a directory` (no `-r` given)
 //! * `cp: -r not specified; omitting directory '<path>'`
+//! * `cp: target '<dst>': Not a directory` (several sources, one plain target)
+//! * `cp: '<src>' and '<dst>' are the same file`
+//! * `cp: cannot copy a directory, '<src>', into itself, '<dst>'`
+//! * `cp: omitting special file '<src>'` (a device, FIFO, or socket)
+//!
+//! Unknown flags use the wording `getopt` produces, again without the
+//! `Try '<command> --help'` line:
+//!
+//! * `cp: invalid option -- 'q'`
+//! * `cp: unrecognized option '--bogus'`
 //!
 //! ## `<reason>` comes from the OS, with the Rust suffix removed
 //!
@@ -67,6 +78,7 @@ mod cp;
 mod ls;
 mod mkdir;
 mod mv;
+mod options;
 mod rm;
 
 #[cfg(test)]

@@ -7,6 +7,54 @@ Format: `Task # - Action - Quick Summary`
 
 ### Phase 2 - Filesystem commands
 
+- **Task 6 - Implemented `cp` - File, into-directory, multi-source, and recursive copies.**
+  The last operand is the destination. An existing directory means "copy into it under the
+  source's basename", which is the audited case; anything else is the exact target path, so
+  `cp a b` creates or overwrites `b`. Several sources require a directory target, otherwise
+  `cp: target '<dst>': Not a directory` when it exists and the OS reason when it does not.
+  `-r` and `-R` are in scope, decided rather than deferred. Task 7's `mv` needs an `EXDEV`
+  fallback that copies a directory tree and its own task says to reuse the `cp` internals, so
+  the recursive walk had to exist either way, and the subject asks for "files and directories
+  as required by normal Unix `cp` behavior". Without the flag a directory source is refused
+  with `cp: -r not specified; omitting directory '<path>'`, exactly as GNU does.
+  Symlinks follow the real `cp` rule: a plain copy dereferences the link and copies the file
+  behind it, a recursive copy recreates the link. Verified against the host both ways.
+  Permissions are preserved on files and on directories created by the walk. Directory modes
+  are applied after the contents are written, since a source directory without write
+  permission would otherwise lock its own copy before the files went in.
+  Two guards against footguns that lose data rather than merely fail. Copying a file onto
+  itself is refused with `cp: '<src>' and '<dst>' are the same file`, compared by device and
+  inode, not by path text, because creating the target truncates it and `cp a ./a` would
+  otherwise leave an empty file. Copying a directory into itself is refused with
+  `cp: cannot copy a directory, '<src>', into itself, '<dst>'`, checked on canonicalized
+  paths, because the walk would otherwise copy the tree it is growing and fill the disk.
+  Devices, FIFOs, and sockets are skipped with `cp: omitting special file '<src>'`. The
+  standard library cannot create those nodes without libc, and reading a FIFO would hang the
+  shell until something wrote to it.
+  `cp` copies through `File::open` plus `File::create` plus `io::copy` rather than `fs::copy`,
+  because `fs::copy` returns one error for both sides and Unix names the side that failed
+  (`cannot open '<src>' for reading` against `cannot create regular file '<dst>'`). No speed
+  is lost: `io::copy` between two files uses the same `copy_file_range` path underneath.
+  Verified against the host `cp`: the audit case produces an identical tree, a recursive copy
+  of a tree with a nested directory, a symlink, and non-default modes is identical under
+  `diff -r` and `stat`, and all ten error cases print byte for byte what the host prints once
+  its `Try 'cp --help'` lines are dropped.
+
+- **Task 6 (shared) - Added the short-option parser - `filesystem/options.rs`, with 6 tests.**
+  Written for `cp -r` but built for tasks 8 and 13, which need `rm -rf` and the clustered
+  `ls -laF` with the same invalid-option wording. Each command names the letters it accepts,
+  and gets back the flags and the operands in their original order. Flags work in any
+  position (`cp a b -r`), cluster (`-rR`), and stop at `--`, so a file genuinely named `-r` is
+  still reachable as `cp -- -r dst`. A lone `-` stays an operand. Unknown options are returned
+  whole rather than as text, so a short flag reports `cp: invalid option -- 'q'` and a long one
+  reports `cp: unrecognized option '--bogus'`, which is what `getopt` prints for each.
+  This is a deliberate divergence from `mkdir`, which parses no flags at all and so creates a
+  directory named `-p`. `mkdir` gains nothing from the parser today; it can adopt it if `-p`
+  is ever wanted.
+  Added `report::invalid_option` and `report::unrecognized_option` alongside it, and dropped
+  the `TODO(task 4-9)` attributes from `missing_file_operand` and `missing_destination_operand`,
+  which `cp` now calls.
+
 - **Task 5 - Implemented `cat` - Streams each operand to the output as raw bytes.**
   `File::open` per operand, then a 64 KiB block copied straight to the output writer, so a
   large file costs a fixed amount of memory and the bytes are never routed through `String`.
