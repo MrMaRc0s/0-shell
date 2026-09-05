@@ -1,7 +1,8 @@
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
 use super::options::{self, Invalid};
@@ -15,15 +16,19 @@ use crate::commands::report;
 /// line between blocks. Operands that cannot be reached are reported and the
 /// rest are still listed.
 ///
-/// The `-a`, `-F`, and `-l` options belong to tasks 10 through 13 and are not
-/// accepted yet, so `ls -l` reports an invalid option rather than silently
-/// listing something else.
+/// `-a` adds the hidden entries, `.` and `..` among them. `-F` appends the type
+/// indicator: `/` for a directory, `*` for an executable file, `@` for a
+/// symlink, `|` for a FIFO, and `=` for a socket.
+///
+/// The `-l` long format belongs to tasks 12 and 13 and is not accepted yet, so
+/// `ls -l` reports an invalid option rather than silently listing something
+/// else.
 pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
 where
     W: Write,
     E: Write,
 {
-    let parsed = match options::parse(args, "") {
+    let parsed = match options::parse(args, "aF") {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),
@@ -39,21 +44,41 @@ where
     // Operands are sorted and split before anything is printed, because a
     // listing shows every file operand together and then each directory, in
     // name order, whatever order they were typed in.
+    let all = parsed.has('a');
+    let classify = parsed.has('F');
+
     let mut files = Vec::new();
     let mut directories = Vec::new();
     for operand in operands {
-        // `metadata` follows symlinks: `ls dirlink` lists the directory the
-        // link points at, as it does in Unix.
-        match Path::new(operand).metadata() {
+        // A symlink operand is normally followed, so `ls dirlink` lists the
+        // directory the link points at. `-F` turns that off, as in Unix: the
+        // whole point of the flag is to say what the operand itself is, and
+        // `ls -F dirlink` prints `dirlink@`.
+        let path = Path::new(operand);
+        let metadata = if classify {
+            path.symlink_metadata()
+        } else {
+            // A symlink with nothing at the end of it still names something
+            // that is there, so the link itself is described rather than
+            // reported missing. This is the host's behavior; GNU `ls` prints
+            // `cannot access` here instead.
+            path.metadata()
+                .or_else(|error| match path.symlink_metadata() {
+                    Ok(metadata) => Ok(metadata),
+                    Err(_) => Err(error),
+                })
+        };
+
+        match metadata {
             Ok(metadata) if metadata.is_dir() => directories.push(operand),
-            Ok(_) => files.push(operand),
+            Ok(metadata) => files.push((operand, indicator(&metadata, classify))),
             Err(error) => {
                 let subject = format!("cannot access {}", report::quoted(operand));
                 report::io_error("ls", &subject, &error, errors)?;
             }
         }
     }
-    files.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    files.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     directories.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
     // Headers are for telling blocks apart, so one operand needs none, even
@@ -62,14 +87,15 @@ where
     let mut printed = false;
 
     if !files.is_empty() {
-        for file in files {
-            write_line(file.as_bytes(), output)?;
+        for (file, indicator) in files {
+            write_line(file.as_bytes(), indicator, output)?;
         }
         printed = true;
     }
 
     for directory in directories {
-        let names = match read_names(Path::new(directory)) {
+        let path = Path::new(directory);
+        let names = match read_names(path, all) {
             Ok(names) => names,
             Err(error) => {
                 // Reported before any header is written, so a directory that
@@ -90,21 +116,33 @@ where
         printed = true;
 
         for name in names {
-            write_line(name.as_bytes(), output)?;
+            write_line(
+                name.as_bytes(),
+                entry_indicator(&path.join(&name), classify),
+                output,
+            )?;
         }
     }
 
     Ok(())
 }
 
-/// The visible entries of one directory, in name order.
-fn read_names(directory: &Path) -> io::Result<Vec<OsString>> {
+/// The entries of one directory, in name order.
+fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
     let mut names = Vec::new();
+
+    // `read_dir` never yields `.` or `..`, so `-a` has to name them itself.
+    // They sort in with everything else rather than leading the listing: `.` is
+    // byte 0x2e, so a name like `!bang` still comes first, as it does on the
+    // host.
+    if all {
+        names.push(OsString::from("."));
+        names.push(OsString::from(".."));
+    }
 
     for entry in fs::read_dir(directory)? {
         let name = entry?.file_name();
-        // Dotfiles are hidden until `-a` arrives with task 10.
-        if name.as_bytes().first() == Some(&b'.') {
+        if !all && name.as_bytes().first() == Some(&b'.') {
             continue;
         }
         names.push(name);
@@ -118,13 +156,56 @@ fn read_names(directory: &Path) -> io::Result<Vec<OsString>> {
     Ok(names)
 }
 
-/// Writes one name and a newline, as bytes.
-fn write_line<W>(name: &[u8], output: &mut W) -> io::Result<()>
+/// Writes one name, its `-F` indicator, and a newline, as bytes.
+fn write_line<W>(name: &[u8], indicator: &str, output: &mut W) -> io::Result<()>
 where
     W: Write,
 {
     output.write_all(name)?;
+    output.write_all(indicator.as_bytes())?;
     output.write_all(b"\n")
+}
+
+/// The `-F` indicator for a directory entry, looked up by path.
+///
+/// Asks about the link rather than its target, so a symlink is marked `@`
+/// whatever it points at. An entry that has gone since the directory was read
+/// simply gets no indicator.
+fn entry_indicator(path: &Path, classify: bool) -> &'static str {
+    if !classify {
+        return "";
+    }
+
+    match path.symlink_metadata() {
+        Ok(metadata) => indicator(&metadata, true),
+        Err(_) => "",
+    }
+}
+
+/// The character `-F` appends to a name of this kind.
+fn indicator(metadata: &Metadata, classify: bool) -> &'static str {
+    if !classify {
+        return "";
+    }
+
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        "@"
+    } else if file_type.is_dir() {
+        "/"
+    } else if file_type.is_fifo() {
+        "|"
+    } else if file_type.is_socket() {
+        "="
+    } else if file_type.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+        // Any of the three execute bits, whether or not this user holds it,
+        // which is what `ls` marks.
+        "*"
+    } else {
+        // Regular files, block and character devices carry no mark.
+        ""
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +347,31 @@ mod tests {
     }
 
     #[test]
+    fn names_a_symlink_that_points_at_nothing() {
+        let temp = TempDir::new("ls_dangling");
+        let link = temp.arg("dangling");
+        std::os::unix::fs::symlink(temp.arg("nowhere"), &link).unwrap();
+
+        let (named, errors) = listing(vec![link.clone()]);
+        let (classified, _) = listing(vec!["-F".to_string(), link.clone()]);
+        let (missing_output, missing_errors) = listing(vec![temp.arg("nowhere")]);
+
+        assert_eq!(named, format!("{link}\n"));
+        assert_eq!(classified, format!("{link}@\n"));
+        assert!(errors.is_empty());
+
+        // A name with nothing behind it at all is still an error.
+        assert!(missing_output.is_empty());
+        assert_eq!(
+            missing_errors,
+            format!(
+                "ls: cannot access '{}': No such file or directory\n",
+                temp.arg("nowhere")
+            )
+        );
+    }
+
+    #[test]
     fn reports_a_directory_it_cannot_open_without_leaving_a_header() {
         let temp = TempDir::new("ls_unreadable");
         let locked = temp.arg("locked");
@@ -288,6 +394,188 @@ mod tests {
             errors,
             format!("ls: cannot open directory '{locked}': Permission denied\n")
         );
+    }
+
+    /// A directory holding one of every kind of entry `-F` can mark.
+    fn every_kind(temp: &TempDir) -> String {
+        let directory = temp.arg("kinds");
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(temp.arg("kinds/sub")).unwrap();
+        touch(temp, "kinds/plain");
+        touch(temp, "kinds/.hidden");
+        let script = touch(temp, "kinds/script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("sub", temp.arg("kinds/dirlink")).unwrap();
+        std::os::unix::fs::symlink("nowhere", temp.arg("kinds/dangling")).unwrap();
+
+        directory
+    }
+
+    #[test]
+    fn all_includes_the_dot_entries_and_dotfiles_in_name_order() {
+        let temp = TempDir::new("ls_all");
+        touch(&temp, ".hidden");
+        touch(&temp, "visible");
+        touch(&temp, "!bang");
+
+        let (output, errors) = listing(vec!["-a".to_string(), temp.arg("")]);
+
+        // `.` is byte 0x2e, so `!bang` sorts ahead of it, as on the host.
+        assert_eq!(
+            output,
+            "!bang
+.
+..
+.hidden
+visible
+"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn all_lists_the_dot_entries_of_an_empty_directory() {
+        let temp = TempDir::new("ls_all_empty");
+
+        let (output, errors) = listing(vec!["-a".to_string(), temp.arg("")]);
+
+        assert_eq!(
+            output,
+            ".
+..
+"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn classify_marks_each_kind_of_entry() {
+        let temp = TempDir::new("ls_classify");
+        let directory = every_kind(&temp);
+
+        let (output, errors) = listing(vec!["-F".to_string(), directory]);
+
+        assert_eq!(
+            output,
+            "dangling@
+dirlink@
+plain
+script*
+sub/
+"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn classify_marks_a_socket_and_a_fifo() {
+        let temp = TempDir::new("ls_classify_special");
+        let directory = temp.arg("kinds");
+        fs::create_dir(&directory).unwrap();
+
+        // A socket comes from the standard library. A FIFO has no standard
+        // library call behind it, so that half of the test runs only where the
+        // host has `mkfifo`.
+        let _socket = std::os::unix::net::UnixListener::bind(temp.arg("kinds/sock")).unwrap();
+        let piped = std::process::Command::new("mkfifo")
+            .arg(temp.arg("kinds/pipe"))
+            .status()
+            .is_ok_and(|status| status.success());
+
+        let (output, errors) = listing(vec!["-F".to_string(), directory]);
+
+        let expected = if piped { "pipe|\nsock=\n" } else { "sock=\n" };
+        assert_eq!(output, expected);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn classify_and_all_combine() {
+        let temp = TempDir::new("ls_classify_all");
+        let directory = every_kind(&temp);
+
+        let (clustered, errors) = listing(vec!["-aF".to_string(), directory.clone()]);
+        let (separate, _) = listing(
+            args(&["-a", "-F"])
+                .into_iter()
+                .chain([directory])
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(
+            clustered,
+            "./
+../
+.hidden
+dangling@
+dirlink@
+plain
+script*
+sub/
+"
+        );
+        assert_eq!(
+            separate, clustered,
+            "clustered flags must match separate ones"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn classify_names_a_symlink_operand_instead_of_following_it() {
+        let temp = TempDir::new("ls_classify_operand");
+        let directory = temp.arg("real");
+        fs::create_dir(&directory).unwrap();
+        touch(&temp, "real/inside");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+
+        let (followed, _) = listing(vec![link.clone()]);
+        let (classified, errors) = listing(vec!["-F".to_string(), link.clone()]);
+
+        assert_eq!(
+            followed,
+            "inside
+"
+        );
+        assert_eq!(
+            classified,
+            format!(
+                "{link}@
+"
+            )
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn classify_marks_file_operands_and_leaves_headers_alone() {
+        let temp = TempDir::new("ls_classify_operands");
+        let script = touch(&temp, "script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = touch(&temp, "plain");
+        let directory = temp.arg("sub");
+        fs::create_dir(&directory).unwrap();
+
+        let operands = vec![
+            "-F".to_string(),
+            script.clone(),
+            plain.clone(),
+            directory.clone(),
+        ];
+        let (output, errors) = listing(operands);
+
+        assert_eq!(
+            output,
+            format!(
+                "{plain}
+{script}*
+
+{directory}:
+"
+            )
+        );
+        assert!(errors.is_empty());
     }
 
     #[test]

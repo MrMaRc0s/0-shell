@@ -7,6 +7,34 @@ Format: `Task # - Action - Quick Summary`
 
 ### Phase 2 - Filesystem commands
 
+- **Tasks 10 and 11 - Implemented `ls -a` and `ls -F` - Hidden entries and type indicators.**
+  `-a` adds the dotfiles and names `.` and `..` itself, since `read_dir` never yields them.
+  They sort in with everything else rather than leading the listing, so a file called `!bang`
+  still comes first: `.` is byte 0x2e and the order is by raw bytes, as recorded in task 9.
+  `-F` appends `/` for a directory, `*` for a file with any execute bit, `@` for a symlink,
+  `|` for a FIFO, and `=` for a socket. Block and character devices carry no mark, matching
+  the host. The type comes from an `lstat` of each entry, so a symlink is marked `@` whatever
+  it points at, and `std::os::unix::fs::FileTypeExt` covers FIFOs and sockets without a libc
+  dependency.
+  `-F` also stops a symlink operand from being followed, which is the rule in Unix and is
+  easy to miss: `ls dirlink` lists what the link points at, while `ls -F dirlink` prints
+  `dirlink@`. The flag exists to say what the operand is, so following it would answer a
+  different question. Task 12's `-l` will need the same rule.
+  One behavior was corrected against the host during verification. A symlink whose target is
+  gone was being reported as `ls: cannot access '<path>': No such file or directory`, since
+  the operand is stat'ed through the link. The host prints the link's own name instead, so
+  `ls` now falls back to an `lstat` before calling an operand missing. A name with nothing
+  behind it at all is still an error. This is one of the few places where the host and GNU
+  disagree outright rather than in wording, and GNU is the one that prints the error; the
+  host wins here because the audit compares against this terminal, and naming a link that
+  does exist is the more useful answer. Recorded in the README next to the format decisions.
+  Task 13's clustering falls out of the shared parser for free: `-aF`, `-Fa`, and `-a -F` are
+  already the same command, and there is a test pinning that. What task 13 still owes is `-l`.
+  Verified against the host across 17 cases covering both flags, every entry kind including a
+  FIFO and a socket, clustered and separate spellings, symlink operands both ways, a dangling
+  link, an empty directory, and mixed operands with headers. Standard output is byte identical
+  and the error text is identical.
+
 - **Task 9 - Implemented `ls` - Plain listing, sorted, dotfiles hidden, Unix operand grouping.**
   Entries come from `fs::read_dir`, sorted by raw byte value, printed one per line as bytes so
   a name that is not valid UTF-8 survives. Names are byte strings, not text, and the same rule

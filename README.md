@@ -35,6 +35,11 @@ collation rules orders mixed-case names differently: it gives
 `a.txt apple Banana`, where byte order gives `Banana a.txt apple`, since every
 capital letter sorts before every lowercase one in ASCII.
 
+One more difference worth knowing about, this one against GNU rather than the
+host: given a symbolic link whose target is gone, `0-shell` prints the link's
+own name, as the host tool does. GNU `ls` reports
+`ls: cannot access 'name': No such file or directory` instead.
+
 ## Development checks
 
 ```sh
