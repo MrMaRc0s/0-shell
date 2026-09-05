@@ -7,6 +7,51 @@ Format: `Task # - Action - Quick Summary`
 
 ### Phase 2 - Filesystem commands
 
+- **Task 12 - Implemented `ls -l` - The long format, with the calendar and the name lookups written by hand.**
+  Split into `filesystem/ls/`: the command and its blocks in `mod.rs`, the rows and their
+  columns in `long.rs`, `/etc/passwd` and `/etc/group` in `users.rs`, and the clock in
+  `time.rs`. One file for all of it would have been the largest in the project by a wide
+  margin.
+  Rows carry the type character and nine permission bits, with the set-user, set-group, and
+  sticky bits folded into the execute positions the way Unix folds them, capital when the
+  special bit is set and the execute bit under it is not (`-rw-r-S---`, `drwxrwxrwt`). Then
+  the hard link count, owner, group, size, modification time, and name, with `name -> target`
+  for a symlink and the `total` line, in 1024-byte units, above a directory's rows.
+  Every stat is an `lstat`. `-l` describes the entry, so a symlink's own size, mode, and time
+  are the ones that belong in its row, and a symlink operand is not followed, the same rule
+  `-F` follows.
+  Owner and group names come from `/etc/passwd` and `/etc/group`, read once per listing, with
+  the numeric id as the fallback for an id no file claims. That is the one part the task
+  flagged as not being a standard library call, and it is not: `getpwuid` lives in libc.
+  Times needed two things the standard library does not have. Epoch seconds become a civil
+  date through Howard Hinnant's algorithm, which shifts the epoch to March so leap days land
+  at the end of a four-century era and February needs no special case. Local time comes from
+  parsing the compiled zone file (`$TZ`, else `/etc/localtime`) in the TZif format, both the
+  32-bit and the 64-bit layout, and binary searching its changeovers, so daylight saving is
+  right: a file stamped in March prints its March offset while the listing runs in September.
+  The recent window is the real one, six months back and an hour forward, outside which the
+  year replaces the time of day. Both spellings are twelve characters, which is why the time
+  column needs no padding.
+  Column widths are measured after the rows are built. Link count and size are right-aligned,
+  owner and group left-aligned, each to the widest value in the block. Device files put
+  `major, minor` in the size column, taken from `rdev` with the split glibc's macros use.
+  The device column follows the host rather than GNU, and the difference is visible in `/dev`:
+  the widest major and the widest minor need not belong to the same entry, and where they do
+  not, the host lets device rows reach a column further right than the byte counts rather than
+  widening every row to match. Ours does the same, so `ls -l /dev` is identical.
+  Verified against the host across 17 cases: `/dev` with its 178 device rows, `/var/log` with
+  its differing owner and group widths, `/`, mixed operands with headers, symlinks including a
+  dangling one, `-la`, `-lF`, `-laF`, a set-user-id file, a set-group-id file without an
+  execute bit, a sticky directory, a socket, a FIFO, a hard link, and files stamped in 2019,
+  in a different daylight saving offset, and in the future. Byte identical throughout, except
+  `/proc`'s link count, which changed between the two runs because the kernel was still
+  making processes.
+  Not implemented: `-h`. It is not in the task list, so `ls -lah` reports
+  `ls: invalid option -- 'h'`.
+  Task 13 is done as a side effect and has been since task 10: the shared parser clusters and
+  reorders flags, so `ls -l -a -F`, `ls -laF`, and `ls -al` are one command, with tests
+  pinning it.
+
 - **Tasks 10 and 11 - Implemented `ls -a` and `ls -F` - Hidden entries and type indicators.**
   `-a` adds the dotfiles and names `.` and `..` itself, since `read_dir` never yields them.
   They sort in with everything else rather than leading the listing, so a file called `!bang`

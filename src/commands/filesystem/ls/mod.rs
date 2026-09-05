@@ -1,12 +1,17 @@
+mod long;
+mod time;
+mod users;
+
 use std::ffi::OsString;
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::options::{self, Invalid};
 use crate::commands::report;
+use long::Item;
 
 /// Lists the named directories and files, or the working directory.
 ///
@@ -18,17 +23,15 @@ use crate::commands::report;
 ///
 /// `-a` adds the hidden entries, `.` and `..` among them. `-F` appends the type
 /// indicator: `/` for a directory, `*` for an executable file, `@` for a
-/// symlink, `|` for a FIFO, and `=` for a socket.
-///
-/// The `-l` long format belongs to tasks 12 and 13 and is not accepted yet, so
-/// `ls -l` reports an invalid option rather than silently listing something
-/// else.
+/// symlink, `|` for a FIFO, and `=` for a socket. `-l` prints the long format,
+/// a `total` line and one aligned row per entry. The flags combine in any
+/// spelling: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same command.
 pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
 where
     W: Write,
     E: Write,
 {
-    let parsed = match options::parse(args, "aF") {
+    let parsed = match options::parse(args, "aFl") {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),
@@ -46,6 +49,10 @@ where
     // name order, whatever order they were typed in.
     let all = parsed.has('a');
     let classify = parsed.has('F');
+    let long = parsed.has('l');
+    // Both flags describe the operand itself, so neither follows a symlink
+    // named on the command line.
+    let name_the_link = classify || long;
 
     let mut files = Vec::new();
     let mut directories = Vec::new();
@@ -55,7 +62,7 @@ where
         // whole point of the flag is to say what the operand itself is, and
         // `ls -F dirlink` prints `dirlink@`.
         let path = Path::new(operand);
-        let metadata = if classify {
+        let metadata = if name_the_link {
             path.symlink_metadata()
         } else {
             // A symlink with nothing at the end of it still names something
@@ -87,8 +94,19 @@ where
     let mut printed = false;
 
     if !files.is_empty() {
-        for (file, indicator) in files {
-            write_line(file.as_bytes(), indicator, output)?;
+        if long {
+            let items = files
+                .iter()
+                .map(|(file, _)| Item {
+                    display: file.as_bytes().to_vec(),
+                    path: PathBuf::from(file),
+                })
+                .collect::<Vec<_>>();
+            long::write(&items, false, classify, output, errors)?;
+        } else {
+            for (file, indicator) in files {
+                write_line(file.as_bytes(), indicator, output)?;
+            }
         }
         printed = true;
     }
@@ -115,12 +133,23 @@ where
         }
         printed = true;
 
-        for name in names {
-            write_line(
-                name.as_bytes(),
-                entry_indicator(&path.join(&name), classify),
-                output,
-            )?;
+        if long {
+            let items = names
+                .iter()
+                .map(|name| Item {
+                    display: name.as_bytes().to_vec(),
+                    path: path.join(name),
+                })
+                .collect::<Vec<_>>();
+            long::write(&items, true, classify, output, errors)?;
+        } else {
+            for name in names {
+                write_line(
+                    name.as_bytes(),
+                    entry_indicator(&path.join(&name), classify),
+                    output,
+                )?;
+            }
         }
     }
 
@@ -183,7 +212,7 @@ fn entry_indicator(path: &Path, classify: bool) -> &'static str {
 }
 
 /// The character `-F` appends to a name of this kind.
-fn indicator(metadata: &Metadata, classify: bool) -> &'static str {
+pub(super) fn indicator(metadata: &Metadata, classify: bool) -> &'static str {
     if !classify {
         return "";
     }
@@ -579,12 +608,107 @@ sub/
     }
 
     #[test]
-    fn rejects_options_that_are_not_implemented_yet() {
-        let (output, errors) = listing(args(&["-l"]));
+    fn long_format_rows_carry_every_column() {
+        let temp = TempDir::new("ls_long_row");
+        let path = temp.arg("f");
+        fs::write(&path, b"hello\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (output, errors) = listing(vec!["-l".to_string(), path.clone()]);
+
+        let row = output.trim_end();
+        let fields: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(fields[0], "-rw-r--r--", "mode");
+        assert_eq!(fields[1], "1", "hard links");
+        assert!(!fields[2].is_empty(), "owner");
+        assert!(!fields[3].is_empty(), "group");
+        assert_eq!(fields[4], "6", "size in bytes");
+        assert!(
+            [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            ]
+            .contains(&fields[5]),
+            "month: {row}"
+        );
+        assert!(
+            (1..=31).contains(&fields[6].parse::<u32>().unwrap()),
+            "day of month: {row}"
+        );
+        // Written a moment ago, so the recent form: hours and minutes.
+        let (hours, minutes) = fields[7].split_once(':').expect("a time of day");
+        assert!(hours.len() == 2 && minutes.len() == 2, "time: {row}");
+        assert_eq!(fields[8], path, "the name closes the row");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn long_format_totals_a_directory_but_not_a_file() {
+        let temp = TempDir::new("ls_long_total");
+        let file = temp.arg("f");
+        fs::write(&file, b"hello\n").unwrap();
+
+        let (directory, _) = listing(vec!["-l".to_string(), temp.arg("")]);
+        let (single, errors) = listing(vec!["-l".to_string(), file]);
+
+        assert!(
+            directory.starts_with("total "),
+            "a directory block is headed by its block count: {directory}"
+        );
+        assert!(
+            !single.starts_with("total "),
+            "a file operand has no total: {single}"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn long_format_aligns_the_columns_to_the_widest_value() {
+        let temp = TempDir::new("ls_long_align");
+        fs::write(temp.arg("large"), vec![b'x'; 12_000]).unwrap();
+        fs::write(temp.arg("small"), b"xx").unwrap();
+
+        let (output, errors) = listing(vec!["-l".to_string(), temp.arg("")]);
+
+        let rows: Vec<&str> = output.lines().skip(1).collect();
+        // The size column is as wide as `12000`, so the two byte counts are
+        // right-aligned against each other and every later column lines up.
+        assert!(rows[0].contains(" 12000 "), "{}", rows[0]);
+        assert!(rows[1].contains("     2 "), "{}", rows[1]);
+        assert_eq!(
+            rows[0].find(" 12000 ").unwrap() + " 12000".len(),
+            rows[1].find("     2 ").unwrap() + "     2".len(),
+            "both size fields end in the same column"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn long_format_shows_a_symlink_and_its_target() {
+        let temp = TempDir::new("ls_long_symlink");
+        fs::write(temp.arg("f"), b"x").unwrap();
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("f", &link).unwrap();
+
+        let (plain, _) = listing(vec!["-l".to_string(), link.clone()]);
+        let (classified, errors) = listing(vec!["-lF".to_string(), link.clone()]);
+
+        assert!(
+            plain.starts_with('l'),
+            "a symlink row starts with l: {plain}"
+        );
+        assert!(plain.trim_end().ends_with(&format!("{link} -> f")));
+        // `-F` marks the link, and leaves the target alone.
+        assert!(classified.trim_end().ends_with(&format!("{link}@ -> f")));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn rejects_options_it_does_not_have() {
+        let (output, errors) = listing(args(&["-q"]));
         let (_, long) = listing(args(&["--bogus"]));
 
         assert!(output.is_empty());
-        assert_eq!(errors, "ls: invalid option -- 'l'\n");
+        assert_eq!(errors, "ls: invalid option -- 'q'\n");
         assert_eq!(long, "ls: unrecognized option '--bogus'\n");
     }
 }

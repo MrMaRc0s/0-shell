@@ -35,6 +35,25 @@ collation rules orders mixed-case names differently: it gives
 `a.txt apple Banana`, where byte order gives `Banana a.txt apple`, since every
 capital letter sorts before every lowercase one in ASCII.
 
+### What `ls -l` resolves by hand
+
+Two of the long format's columns have no standard library call behind them, and
+`Cargo.toml` has no dependencies, so both are worked out from the system's own
+files.
+
+Owner and group names come from `/etc/passwd` and `/etc/group`. An id that
+appears in neither is printed as the number, which is what `ls` does for an id
+whose account is gone. A machine whose accounts live in LDAP or another NSS
+source resolves fewer names than the real `ls` would.
+
+Times are local, and the offset comes from the compiled zone file the system
+points at: `$TZ` when it names a zone, `/etc/localtime` otherwise. Daylight
+saving is honoured, since the file records every changeover. Two limits: a `TZ`
+holding rules rather than a zone name (`EET-2EEST,M3.5.0/3`) falls back to UTC,
+and a timestamp past the last changeover a zone file lists, which on this system
+is in 2037, keeps the last known offset instead of applying the file's trailing
+rule.
+
 One more difference worth knowing about, this one against GNU rather than the
 host: given a symbolic link whose target is gone, `0-shell` prints the link's
 own name, as the host tool does. GNU `ls` reports
