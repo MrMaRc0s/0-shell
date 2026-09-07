@@ -17,7 +17,7 @@ matches it exactly.
 
 **Question:** Was the project written in Rust?
 
-**Answer:** Yes. The whole project is Rust: `Cargo.toml`, and 19 `.rs` files
+**Answer:** Yes. The whole project is Rust: `Cargo.toml`, and 25 `.rs` files
 under `src/`. It builds with `cargo build` and needs nothing else. `Cargo.toml`
 declares no dependencies at all, and `Cargo.lock` holds exactly one package,
 this one, so every behaviour below is written here or comes from the Rust
@@ -52,11 +52,23 @@ that never reach the binary. They are pointed out here rather than left for a
 grep to turn up, since the honest answer is "none in the program, two in the
 test suite, and here is why".
 
-Worth adding: two things `ls -l` would normally get from libc are written by
-hand for the same reason. Owner and group names are resolved by parsing
-`/etc/passwd` and `/etc/group`, and timestamps are turned into local dates by
-reading the system's compiled timezone file, with the calendar arithmetic done
-in `src/commands/filesystem/ls/time.rs`.
+Worth adding: three things that would normally come from libc are done here
+instead, for the same reason. Owner and group names are resolved by parsing
+`/etc/passwd` and `/etc/group`. Timestamps are turned into local dates by
+reading the system's compiled timezone file, with the calendar arithmetic in
+`src/commands/filesystem/ls/time.rs`. And the interactive line editor puts the
+terminal into raw mode by issuing the `TCGETS` and `TCSETS` ioctls itself, in
+`src/terminal/raw.rs`.
+
+That last one is the only `unsafe` in the project and the only assembly: about
+sixty lines holding the Linux system-call instruction for x86_64 and aarch64,
+with a documented safety note on each call. It is worth being plain about why it
+is there, because a grep for `asm!` will find it. A system call is not a spawned
+program: this is the same `ioctl` a C program would reach through libc, and the
+subject's own resources point at `man 2` pages for exactly this kind of work.
+The forbidden thing would have been to run `stty`, which is the easy way to set
+these bits and would have been an external binary. Nothing here creates a
+process.
 
 ---
 
@@ -398,16 +410,60 @@ command rather than exiting.
 
 **Question:** Did the student handle `Ctrl + C` gracefully?
 
-**Answer:** No. Signal handling was declared out of scope in
-[`PLAN.md`](PLAN.md) and was not implemented. Ctrl+C terminates the shell as it
-would any program without a handler.
+**Answer:** Yes, at the prompt, which is where it matters. Pressing Ctrl+C
+while typing prints `^C`, throws the half-typed line away, and returns a fresh
+prompt. The shell does not exit.
+
+Verified over a pseudo-terminal, checking the process itself rather than the
+screen, since a terminal echoes typed characters even after the program behind
+it has died:
+
+```
+Ctrl+C at an empty prompt         -> shell alive
+Ctrl+C with a half-typed line     -> shell alive
+Ctrl+C while a command is running -> shell exits (signal 2)
+```
+
+The third line is a deliberate limit and is stated rather than hidden. The
+shell takes the terminal into raw mode only while a line is being edited, which
+is what stops the kernel turning Ctrl+C into a `SIGINT`; a command then runs
+with the terminal as the user's own shell left it. Holding raw mode throughout
+would make the shell survive that case too, at the price of making a long
+`cp -r` impossible to stop, because commands here run in-process rather than as
+child processes: there is no child to signal and no cancellation point to poll.
+Between a shell that cannot be interrupted and one that can, the escape hatch
+was judged worth more.
+
+No external program is involved. Terminal modes are set with the `TCSETS`
+ioctl, issued directly in `src/terminal/raw.rs`; `stty` would have been the easy
+way and is exactly what the subject forbids.
 
 ---
 
 **Question:** Did the student add auto-completion when writing a command?
 
-**Answer:** No. Not implemented, and out of scope per `PLAN.md`. Line editing
-comes from the terminal, so there is no completion and no history.
+**Answer:** Yes. Tab completes the word the cursor is in.
+
+The first word of a line is a command, so it completes against this shell's own
+command names. Every other word is a path, so it completes against the
+filesystem. A single candidate is filled in whole and finished with a space, or
+with a `/` when it names a directory so the path can be walked further. Several
+candidates fill in as much as they all agree on, and list themselves when they
+agree on nothing further. Hidden files stay hidden until the leading dot is
+typed, and completion works mid-line, not only at the end of one.
+
+Observed at a real terminal:
+
+```
+ec      + Tab  ->  echo
+c       + Tab  ->  lists: cat  cd  cp
+ls pro  + Tab  ->  ls project/
+ls al   + Tab  ->  lists: album.txt  alpha.txt
+```
+
+Completion never consults `$PATH`. This shell runs no external program, so
+offering a name from `$PATH` would be offering a command that answers
+`Command 'name' not found`.
 
 ---
 
@@ -442,8 +498,29 @@ so it matches what the audit expects to see.
 
 **Question:** Did the student add any other features or commands to the project?
 
-**Answer:** No extra commands, but the required ones go beyond the minimum in
-several places:
+**Answer:** No extra commands, but two further bonuses from the subject's list
+are implemented, and the required commands go beyond the minimum in several
+places.
+
+**Command history.** Up and Down walk through the lines entered this session.
+The half-typed line is kept when the walk starts, so Down returns to it. Blank
+lines and immediate repeats are not recorded. History is held in memory for the
+session and not written to a file.
+
+**A line editor.** Left and Right, Home and End (also Ctrl+A and Ctrl+E),
+Backspace and Delete, and Ctrl+U to clear the line. Ctrl+D ends the shell only
+on an empty line and deletes forwards otherwise, as it does in bash, so a
+session cannot end by surprise mid-edit. Characters outside ASCII are decoded
+from UTF-8 and edit as single characters rather than as bytes.
+
+All of this applies only when the input really is a terminal. Piped or
+redirected input takes the plain reading path, so scripts, the test suite, and
+the audit's own transcript are byte for byte what they were before any of it
+existed. Two known limits: a line longer than the terminal is wide will wrap and
+untidy the redraw, and a lone Escape keypress is not resolved until the next
+key, being indistinguishable from the start of an arrow key without a timer.
+
+The required commands also go beyond the minimum:
 
 * **Option parsing shared by every command.** Flags work in any position, cluster
   (`ls -laF`), tolerate repeats, and stop at `--`, so a file genuinely named
@@ -465,5 +542,5 @@ several places:
   removes both `present` and `other`. This was tested deliberately against
   missing operands, nonexistent paths, permission-denied paths, a file where a
   directory belongs, unclosed quotes, very long input, and binary files.
-* **132 automated tests**, including one that drives the shell through this
+* **168 automated tests**, including one that drives the shell through this
   audit's entire script and checks the result.

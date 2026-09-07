@@ -1,45 +1,70 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 
 use crate::commands::{CommandAction, dispatch};
 use crate::parser::parse;
+use crate::terminal::{Line, LineSource, PipedLines, Terminal};
+
+/// What the shell shows when it wants a command.
+const PROMPT: &str = "$ ";
 
 pub fn run() -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
     let mut output = io::stdout().lock();
     let mut errors = io::stderr().lock();
 
-    run_with_io(&mut input, &mut output, &mut errors)
+    // A person gets the line editor; anything else gets plain line reading.
+    // Deciding here rather than inside the loop keeps the piped path exactly
+    // what it always was, which is the path the audit script takes.
+    if let Some(mut terminal) = Terminal::new() {
+        return run_loop(&mut terminal, &mut output, &mut errors);
+    }
+
+    let stdin = io::stdin();
+    let mut piped = PipedLines::new(stdin.lock());
+
+    run_loop(&mut piped, &mut output, &mut errors)
 }
 
-fn run_with_io<R, W, E>(input: &mut R, output: &mut W, errors: &mut E) -> io::Result<()>
+/// The read, parse, dispatch loop, whatever the lines are coming from.
+fn run_loop<S, W, E>(source: &mut S, output: &mut W, errors: &mut E) -> io::Result<()>
 where
-    R: BufRead,
+    S: LineSource,
     W: Write,
     E: Write,
 {
-    let mut line = String::new();
-
     loop {
-        write!(output, "$ ")?;
-        output.flush()?;
-
-        line.clear();
-        if input.read_line(&mut line)? == 0 {
-            writeln!(output)?;
-            return Ok(());
-        }
-
-        match parse(&line) {
-            Ok(Some(command)) => {
-                if dispatch(&command, output, errors)? == CommandAction::Exit {
-                    return Ok(());
-                }
+        match source.next_line(PROMPT, output)? {
+            Line::EndOfInput => {
+                writeln!(output)?;
+                return Ok(());
             }
-            Ok(None) => {}
-            Err(error) => writeln!(errors, "0-shell: {error}")?,
+            // Ctrl+C: the line is abandoned, nothing runs, and the shell asks
+            // again. This is the whole of the bonus, and it is this short only
+            // because raw mode stopped the kernel turning it into a signal.
+            Line::Interrupted => {}
+            Line::Entered(line) => match parse(&line) {
+                Ok(Some(command)) => {
+                    if dispatch(&command, output, errors)? == CommandAction::Exit {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => writeln!(errors, "0-shell: {error}")?,
+            },
         }
     }
+}
+
+/// Drives the loop over one reader, for the tests and the audit transcript.
+#[cfg(test)]
+fn run_with_io<R, W, E>(input: &mut R, output: &mut W, errors: &mut E) -> io::Result<()>
+where
+    R: std::io::BufRead,
+    W: Write,
+    E: Write,
+{
+    let mut piped = PipedLines::new(input);
+
+    run_loop(&mut piped, output, errors)
 }
 
 #[cfg(test)]

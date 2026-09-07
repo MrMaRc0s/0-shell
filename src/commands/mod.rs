@@ -6,6 +6,16 @@ use std::io::{self, Write};
 
 use crate::parser::ParsedCommand;
 
+/// Every command name this shell answers to, for Tab completion.
+///
+/// Kept beside `dispatch` because it has to match the arms below: a name
+/// offered here that `dispatch` does not know would complete to
+/// `Command 'name' not found`. Deliberately not drawn from `$PATH`, since this
+/// shell runs no external program and would be offering names it cannot run.
+pub const COMMAND_NAMES: [&str; 10] = [
+    "cat", "cd", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandAction {
     Continue,

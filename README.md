@@ -4,6 +4,12 @@
 implemented with Rust's standard filesystem and operating-system APIs: the
 shell never launches an external binary, and `Cargo.toml` has no dependencies.
 
+Not launching a binary is the subject's rule. Taking no dependencies is this
+project's own choice, kept because it is what makes the shell interesting: the
+owner and group columns of `ls -l` are read from `/etc/passwd` and `/etc/group`,
+its dates are computed from the system's timezone file, and its line editor
+talks to the kernel directly.
+
 ## Build and run
 
 ```sh
@@ -56,17 +62,81 @@ same recursive copy `cp -r` runs, followed by the same removal `rm -r` runs.
 The source is deleted only once the copy is known to have completed, so a
 fallback that fails partway leaves the original where it is.
 
+## Interactive editing
+
+At a terminal the shell reads a line itself rather than letting the kernel do
+it, which is what makes the three bonus features below possible. Piped or
+redirected input takes the plain path instead, unchanged and unaware any of this
+exists, so scripts and the audit transcript behave exactly as they always did.
+
+| Key | Does |
+|---|---|
+| `Tab` | Completes the word at the cursor |
+| `Up` / `Down` | Walks through previous lines |
+| `Left` / `Right`, `Home` / `End` | Moves within the line |
+| `Backspace`, `Delete` | Removes either side of the cursor |
+| `Ctrl+A` / `Ctrl+E` | Start and end of line |
+| `Ctrl+U` | Clears the line |
+| `Ctrl+C` | Abandons the line, keeps the shell |
+| `Ctrl+D` | Exits on an empty line, deletes forwards otherwise |
+
+### Ctrl+C
+
+At the prompt, Ctrl+C prints `^C`, throws the half-typed line away, and gives a
+fresh prompt. The shell does not exit. This works because raw mode turns off the
+terminal's signal generation, so Ctrl+C arrives as byte 3 for the editor to act
+on rather than as a `SIGINT` that would end the process.
+
+**While a command is running, Ctrl+C still interrupts the shell.** That is
+deliberate. Raw mode is held only while a line is being edited, so a command
+runs with the terminal exactly as the user's own shell left it. The alternative,
+holding raw mode throughout, would make the shell immortal at the cost of making
+a long `cp -r` impossible to stop: commands run in-process, not as children, so
+there is no child to signal and no cancellation point to check. Between a shell
+that cannot be interrupted and one that can, the escape hatch is worth more.
+
+### Auto-completion
+
+The first word of a line completes against this shell's own command names; every
+other word completes against the filesystem. One candidate is filled in whole,
+with a trailing space, or a `/` when it is a directory so the path can be walked
+further. Several candidates fill in as much as they all agree on, and list
+themselves when they agree on nothing more. Hidden files stay hidden until the
+leading dot is typed.
+
+Completion never consults `$PATH`. This shell runs no external program, so a
+name from `$PATH` would complete to something that answers
+`Command 'name' not found`.
+
+### History
+
+Up and Down walk through the lines entered this session, keeping the half-typed
+line so Down returns to it. Blank lines and immediate repeats are not recorded.
+History lives in memory for the session and is not written to a file.
+
+### What the editor does not do
+
+A line longer than the terminal is wide will wrap, and the redraw does not track
+the extra rows, so a very long command can leave the display untidy until the
+next prompt. Pressing Escape on its own is not resolved until the next keypress,
+because a lone escape is indistinguishable from the start of an arrow key
+without a timer.
+
 ## Deviations from GNU behavior
 
 ### `ls` prints one entry per line, always
 
 The real `ls` prints in columns when its output is a terminal and one per line
 when it is piped or redirected, which is why `ls | cat` looks different from
-`ls`. Choosing the columns would mean knowing the terminal width, and the only
-way to ask for it is the `TIOCGWINSZ` ioctl, which needs a C binding this
-project does not have: `Cargo.toml` has no dependencies, by the exercise's
-rules. Rather than guess a width and print columns that line up with nothing,
-`0-shell` prints the form the host tool itself falls back to.
+`ls`. Columns need the terminal width, which comes from the `TIOCGWINSZ` ioctl.
+
+This was once impossible here and no longer is: `src/terminal/raw.rs` issues
+ioctls directly for the line editor, and asking for the width would be a third
+one. Staying with one entry per line is now a choice rather than a limit. It is
+the form the host tool itself falls back to, so a side by side comparison shows
+the same names in the same order and `ls | cat` on the host matches this shell
+exactly. Columns would make that comparison depend on both terminals being the
+same width.
 
 So an auditor comparing side by side sees the same names in the same order, one
 per line instead of in columns. `ls | cat` in the host terminal produces exactly
@@ -81,7 +151,7 @@ capital letter sorts before every lowercase one in ASCII.
 ### What `ls -l` resolves by hand
 
 Two of the long format's columns have no standard library call behind them, and
-`Cargo.toml` has no dependencies, so both are worked out from the system's own
+this project takes no dependencies, so both are worked out from the system's own
 files.
 
 Owner and group names come from `/etc/passwd` and `/etc/group`. An id that

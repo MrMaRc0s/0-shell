@@ -5,6 +5,64 @@ Format: `Task # - Action - Quick Summary`
 
 ## 2026-09-07
 
+### Bonus - interactive shell
+
+- **Bonus - Implemented Ctrl+C, auto-completion, and history - One piece of work behind all three.**
+  All three need the same thing: the terminal in raw mode. Canonical mode holds input back
+  until Enter, so Tab never arrives as a keystroke and the arrow keys never arrive at all,
+  and it turns Ctrl+C into a `SIGINT` that ends the process before any code here runs. Raw
+  mode settles all three at once, and Ctrl+C becomes byte 3 rather than a signal, so there is
+  no signal handler anywhere in this project and none of the care that would come with one.
+  Reaching raw mode is a `TCSETS` ioctl, which the standard library does not expose. Three
+  ways to get one: run `stty`, which is an external binary and the one thing the subject
+  forbids outright; link `libc`; or issue the system call here. The third was chosen, so
+  `Cargo.toml` stays empty and the shell keeps resolving its own needs, as `ls -l` already
+  does for `/etc/passwd` and for the calendar. `src/terminal/raw.rs` holds the whole of it:
+  the syscall instruction for x86_64 and aarch64, the kernel's `termios` layout, and an RAII
+  guard that restores the terminal on drop. It is the only `unsafe` and the only assembly in
+  the project, about sixty lines, each call carrying its safety note. On any other
+  architecture it reports `ENOTTY`, which is the same answer a pipe gives, so the shell falls
+  back and only the bonuses are missing.
+  The editor above it is ordinary safe Rust: `keys.rs` decodes bytes into keypresses,
+  `history.rs` remembers lines, `completion.rs` works out what a half-typed word could be, and
+  `editor.rs` runs the line. Raw mode is taken per line rather than for the session, so a
+  command runs with the terminal exactly as the user's own shell left it.
+  What the features do is in `README.md`. What matters here is what they do not touch:
+  `is_terminal` decides at startup which reader to use, so piped input goes down the path it
+  always did. All 132 existing tests passed unchanged throughout, and `echo`, `cat`, `ls`, and
+  `ls -l -a -F` are still byte identical to the host.
+
+- **Bonus - Recorded the Ctrl+C limit rather than rounding it up.**
+  Measured over a pseudo-terminal, checking the process rather than the screen, because a
+  terminal echoes typed characters even after the program behind it has died. That mistake
+  was made first and produced a confident false pass: the shell looked alive because the pty
+  had echoed the test's own keystrokes back.
+  Ctrl+C at an empty prompt and Ctrl+C on a half-typed line both leave the shell running.
+  Ctrl+C while a command runs still ends it, because raw mode is only held during editing.
+  Holding it for the whole session would fix that case and cost more than it gives: commands
+  here run in-process, not as children, so there is no child to signal and no cancellation
+  point to poll, and a long `cp -r` would become impossible to stop. The escape hatch is worth
+  more than the immortality, so the limit stands and is written down in `README.md`,
+  `PLAN.md`, and `AuditAnswers.md` instead of being quietly omitted.
+
+- **Bonus - Fixed a bug the key-decoder tests found before any terminal did.**
+  `ESC [ 1 ; 5 C` is Ctrl+Right. The first decoder read digits until something that was not a
+  digit, met the `;`, gave up, and left `5C` in the stream, which the next read took for two
+  ordinary characters and typed into the line. Escape sequences now run to their final byte,
+  the way the standard defines them, so a sequence with no meaning here is still consumed
+  whole. The test that caught it pins both halves: the chord is ignored, and the keys after it
+  still read correctly.
+
+- **Bonus - Corrected two claims in the docs that had stopped being true.**
+  `README.md` explained the one-entry-per-line `ls` by saying column output needs
+  `TIOCGWINSZ`, which needs a C binding "this project does not have". After `raw.rs` that
+  reason is gone: the project issues ioctls. The decision has not changed, but it is now a
+  choice rather than a limit, and the README says so.
+  The same sentence attributed the no-dependency rule to "the exercise's rules", as did
+  `CHANGELOG.md`. It is not there. `Exercise.md` forbids external binaries and system calls
+  that spawn them, three times, and never mentions crates, dependencies, or Cargo. Zero
+  dependencies is this project's own choice, a good one, and is now described as such.
+
 ### Phase 2 - Filesystem commands
 
 - **Task 7 - Implemented `mv` - The last stub is gone, and the audit's move now works.**
@@ -469,10 +527,12 @@ Format: `Task # - Action - Quick Summary`
 
 Done: tasks 1 through 23, and 25. Every command in the subject is implemented and every
 mandatory audit item passes. No stubs remain.
-Open: task 24, the bonus question, which `PLAN.md` still declares out of scope. Nothing to do
-unless that decision changes.
+Task 24, the bonus question, is answered: Ctrl+C, auto-completion, and command history are
+implemented. The remaining optional features (current-directory prompt, colors, `;` chaining,
+pipes, redirection, environment variables, `help`) are still out of scope, and `PLAN.md`
+records why none of them is forbidden should that change.
 
 ## Verification
 
 Every entry above was left with `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
-warning-free, and every test passing (132 as of task 23).
+warning-free, and every test passing (168 as of the bonus work).
