@@ -31,7 +31,7 @@ mod tests {
     use std::fs;
 
     use super::mkdir;
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     #[test]
     fn creates_a_directory() {

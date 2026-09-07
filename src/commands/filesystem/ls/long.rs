@@ -284,7 +284,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::mode_string;
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     fn mode_of(path: &str) -> String {
         mode_string(&fs::symlink_metadata(path).unwrap())

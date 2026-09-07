@@ -38,7 +38,7 @@ where
     }
 
     for operand in &parsed.operands {
-        remove(Path::new(operand), recursive, force, errors)?;
+        remove("rm", Path::new(operand), recursive, force, errors)?;
     }
 
     Ok(())
@@ -50,7 +50,16 @@ where
 /// contents could not all be removed is not worth an `rmdir` that can only fail
 /// a second time with `Directory not empty`, so the child's failure is the only
 /// thing reported.
-fn remove<E>(path: &Path, recursive: bool, force: bool, errors: &mut E) -> io::Result<bool>
+///
+/// `command` names the command the messages belong to, since `mv` removes the
+/// source of a move across filesystems through this same walk.
+pub(super) fn remove<E>(
+    command: &str,
+    path: &Path,
+    recursive: bool,
+    force: bool,
+    errors: &mut E,
+) -> io::Result<bool>
 where
     E: Write,
 {
@@ -60,36 +69,36 @@ where
         Ok(metadata) => metadata,
         Err(error) if force && error.kind() == ErrorKind::NotFound => return Ok(true),
         Err(error) => {
-            report::io_error("rm", &cannot_remove(path), &error, errors)?;
+            report::io_error(command, &cannot_remove(path), &error, errors)?;
             return Ok(false);
         }
     };
 
     if metadata.is_dir() {
         if !recursive {
-            report::detail("rm", &cannot_remove(path), "Is a directory", errors)?;
+            report::detail(command, &cannot_remove(path), "Is a directory", errors)?;
             return Ok(false);
         }
-        return remove_directory(path, force, errors);
+        return remove_directory(command, path, force, errors);
     }
 
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if force && error.kind() == ErrorKind::NotFound => Ok(true),
         Err(error) => {
-            report::io_error("rm", &cannot_remove(path), &error, errors)?;
+            report::io_error(command, &cannot_remove(path), &error, errors)?;
             Ok(false)
         }
     }
 }
 
 /// Removes a directory's contents and then the directory itself.
-fn remove_directory<E>(path: &Path, force: bool, errors: &mut E) -> io::Result<bool>
+fn remove_directory<E>(command: &str, path: &Path, force: bool, errors: &mut E) -> io::Result<bool>
 where
     E: Write,
 {
     if let Some(text) = refusal(path) {
-        report::message("rm", &text, errors)?;
+        report::message(command, &text, errors)?;
         return Ok(false);
     }
 
@@ -97,7 +106,7 @@ where
         Ok(entries) => entries,
         Err(error) if force && error.kind() == ErrorKind::NotFound => return Ok(true),
         Err(error) => {
-            report::io_error("rm", &cannot_remove(path), &error, errors)?;
+            report::io_error(command, &cannot_remove(path), &error, errors)?;
             return Ok(false);
         }
     };
@@ -105,9 +114,9 @@ where
     let mut emptied = true;
     for entry in entries {
         match entry {
-            Ok(entry) => emptied &= remove(&entry.path(), true, force, errors)?,
+            Ok(entry) => emptied &= remove(command, &entry.path(), true, force, errors)?,
             Err(error) => {
-                report::io_error("rm", &cannot_remove(path), &error, errors)?;
+                report::io_error(command, &cannot_remove(path), &error, errors)?;
                 emptied = false;
             }
         }
@@ -121,7 +130,7 @@ where
         Ok(()) => Ok(true),
         Err(error) if force && error.kind() == ErrorKind::NotFound => Ok(true),
         Err(error) => {
-            report::io_error("rm", &cannot_remove(path), &error, errors)?;
+            report::io_error(command, &cannot_remove(path), &error, errors)?;
             Ok(false)
         }
     }
@@ -199,7 +208,7 @@ mod tests {
     use std::path::Path;
 
     use super::{refusal, rm};
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

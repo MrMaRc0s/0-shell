@@ -3,6 +3,130 @@
 Actions performed on the 0-shell project, newest first.
 Format: `Task # - Action - Quick Summary`
 
+## 2026-09-07
+
+### Phase 2 - Filesystem commands
+
+- **Task 7 - Implemented `mv` - The last stub is gone, and the audit's move now works.**
+  `mv` had been skipped: the commit log runs 8, then 9 through 12, then 13 and 14, and the
+  arm in `dispatch` still reached a stub printing `mv: not implemented yet`. Running the
+  audit's own script showed what that cost: `mkdir`, `cp`, and `cat` passed, `mv new_folder2
+  new_folder1` printed the stub, and the `rm -r new_folder1` after it removed the wrong tree
+  and left `new_folder2` orphaned. One mandatory audit question was failing outright.
+  The command renames with `fs::rename`, moves into an existing directory under the source's
+  basename, takes files and directories alike, and needs no flag: a rename moves a whole tree
+  in one step, so there is nothing for `-r` to switch on. It parses options anyway, with an
+  empty allow-list, so `-x` is refused as an option rather than taken for a filename and `--`
+  still works.
+  Three guards come before the rename. A move onto the source itself is refused rather than
+  silently succeeding, which is what POSIX `rename` would do and what `mv dir/file dir`
+  looks like. A directory cannot be moved into its own subdirectory. A symlink moves as
+  itself and is never followed.
+  The cross-device fallback is the part the task called for. `rename` edits directory entries
+  and cannot span mount points, so `EXDEV` (`ErrorKind::CrossesDevices`, stable since long
+  before this toolchain, so no libc and no hardcoded errno) falls back to a recursive copy
+  followed by a removal. Both halves are the code `cp -r` and `rm -r` already run rather than
+  a second implementation, which is what task 7 asked for.
+
+- **Tasks 6 and 8 - Refactored, not rewritten - `cp` and `rm` internals now say who is calling.**
+  Sharing the two walks with `mv` needed three changes. `cp`'s `copy` and `rm`'s `remove` take
+  the name of the command speaking, so a cross-device move reports `mv: cannot create regular
+  file ...` rather than `cp: ...`; GNU shares its transfer code between `cp` and `mv` the same
+  way and prints the same shapes. `copy` now returns `io::Result<bool>` saying whether the copy
+  completed, mirroring `remove`, which already did: `mv` must not delete a source whose copy
+  failed partway, and the `io::Result` cannot carry that answer because its `Err` is reserved
+  for the error stream breaking. And the operand handling both commands share moved into a new
+  `filesystem/transfer.rs`: the target-basename join, the "several sources need a directory"
+  report, and the two identity guards, with a `Command { name, verb }` pair so one helper can
+  write `copy` or `move` as needed.
+
+### Phase 3 - Tests
+
+- **Task 15 - Added the missing unit tests - `mv` had none, because it had no implementation.**
+  Sixteen tests: renaming, the audited directory-into-directory move, a whole tree without a
+  flag, several sources into a directory, a symlink moved as itself, overwriting, both
+  cross-device paths, and the failures (missing operands, missing source with the rest still
+  moved, same file, subdirectory of itself, bad multi-source target, an occupied directory,
+  an unknown flag, and a `-r` filename reached through `--`).
+  The two cross-device tests need a real `EXDEV`, which cannot be faked, so they move between
+  the temporary directory and `/dev/shm`. Where those share a filesystem the tests skip and
+  say so under `--nocapture`, rather than passing on the rename path they exist to avoid.
+  The dispatcher's `mv` placeholder, which asserted only that the name reached the command
+  "whatever `mv` has to say", was replaced by one that checks a real move and a real failure.
+
+- **Task 16 - Extended the fixture - It was already done, and now serves the whole crate.**
+  The `TempDir` guard existed and went further than the task asked, avoiding the process-wide
+  working directory entirely by handing commands absolute paths. Two additions. `TempDir::new_in`
+  takes a root, so a test can allocate on a chosen filesystem, which is what the `EXDEV` tests
+  need. And the working-directory lock, which lived privately in `session.rs`, became a
+  `WorkingDirectory` RAII guard that takes the lock and restores the directory on drop, so the
+  end-to-end test shares the one lock with the `cd` and `pwd` tests as the task requires.
+  The fixture moved from `commands/filesystem/testing.rs` to `src/testing.rs`, since it is no
+  longer only the filesystem commands' and `shell.rs` could not reach it where it was. It also
+  no longer honours a poisoned lock: the directory is restored by the guard either way, and
+  honouring the poison turns one real failure into a cascade of unrelated ones.
+
+- **Task 17 - Added the end-to-end test - One test that types what the auditor types.**
+  It drives `run_with_io` through the whole script with relative paths, as at a real prompt,
+  holding the working directory for the duration. In two halves, because the audit has the
+  host terminal create `new_doc.txt` between them, so the test does that step directly rather
+  than through the shell being tested. Both transcripts are asserted whole, prompts included,
+  and the last assertion is the audit's own question: nothing left behind.
+
+### Phase 4 - Integration and audit rehearsal
+
+- **Task 22 - Ran the stability sweep - It found a real bug, and the bug was mine.**
+  The sweep is meant to prove nothing panics. Nothing did, but `mv / here` hung and filled a
+  4.9G tmpfs before it was killed. The cause was the shared `is_inside` guard. A bare relative
+  target such as `here` has `""` for a parent, `canonicalize("")` fails, and the guard gave up
+  and answered "not inside" when the truth is that every path is inside `/`. The rename
+  returned `EXDEV` because `/` and `/tmp` are different filesystems, and the new fallback set
+  about copying the entire root filesystem into a subdirectory of itself.
+  An empty parent now reads as the working directory. `mv / here` and `mv .. up` are refused
+  instantly. The bug was latent in `cp` before `mv` existed, so `cp -r / here` had the same
+  runaway and is fixed by the same change; `mv` only made it reachable without a flag.
+  Four `is_inside` tests pin it, plus one at the `mv` level for the exact shape, and the
+  component-wise comparison that keeps `dir2` from being read as something inside `dir`.
+  The rest of the sweep is clean: no arguments, too many arguments, nonexistent paths, a file
+  where a directory belongs, `/root`, unclosed quotes of both kinds, a 9000-character
+  argument, `cd` into a file, `cat` of a binary file, `rm -r /`, `rm -r .`, `cp -r /proc/1`,
+  and empty lines. Exit code 0, no panic, correct wording throughout.
+
+- **Task 21 - Diffed against the host - `echo`, `cat`, and `ls -l` are byte identical.**
+  Worth recording first: this machine runs uutils coreutils 0.2.2, the Rust reimplementation
+  Ubuntu now ships, not GNU. That is what "your computer terminal" means for an auditor here.
+  `echo` matches for quoted, unquoted, empty, and repeated-space arguments. `cat` matches byte
+  for byte for text, dotfiles, several operands, and a 200 KB binary file, which is why the
+  comparison is done one command per run and the prompts stripped by byte count: `sed` would
+  have corrupted the binary payload.
+  `ls`, `ls -a`, `ls -F`, `ls -l`, `ls -l -a -F`, and `ls -laF` all match, and so does
+  `ls -l /dev` with its `major, minor` column, `ls -l /etc`, `ls -l /var/log`, and
+  `ls -l /usr/bin`, the last being 1612 entries of mixed owners, groups, sizes, and dates.
+  Two error messages differ, and in both the host departs from GNU while this shell follows
+  it: uutils writes `cat: nope.txt: No such file or directory (os error 2)` with the errno
+  suffix this project deliberately strips, and `mkdir: subdir: File exists` where GNU and
+  `0-shell` write `mkdir: cannot create directory 'subdir': File exists`.
+
+- **Tasks 18, 19, and 20 - Re-ran the checks - Clean, nothing spawned, every audit item passes.**
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and 132 tests, all clean.
+  No production code spawns a process: the only `std::process` in shipped code is
+  `process::id`, which reads a PID, and `Cargo.lock` still holds one package, this one. Two
+  test modules do call `mkfifo`, guarded and skipped where it is absent, because creating a
+  FIFO needs a system call the standard library does not expose. They are test-only and never
+  reach the binary, but an auditor grepping `std::process` will find them, so they are worth
+  knowing about.
+  The full audit walkthrough was run against the release binary: prompt, Enter-only execution,
+  `exit`, both `echo` forms, `pwd`, `mkdir` parent and two children then `cd` and `pwd`, bare
+  `cd` to home, `ls`, `ls -l -a -F`, `cp` into a directory, `cat`, `mv` a directory into a
+  directory, `rm -r`, EOF, and the unknown-command message. All pass.
+
+- **Task 23 - Updated the README - The finished command set, and where it parts from GNU.**
+  Added a table of every command with its options, the `cp -r` and `mv` decisions the task
+  asked to document, the error-message conventions (the errno suffix stripped, the
+  `Try '--help'` line left out), and a section on comparing against the host that names the
+  uutils difference so an auditor is not surprised by it. The existing `ls` sections were
+  kept.
+
 ## 2026-09-05
 
 ### Phase 2 - Filesystem commands
@@ -343,12 +467,12 @@ Format: `Task # - Action - Quick Summary`
 
 ## Current state
 
-Done: tasks 1, 2, 3, 4, 25, and task 16 in part. Task 14 was absorbed into task 1.
-Next: task 5 (`cat`), then 6 (`cp`), 7 (`mv`), 8 (`rm`), and 9 through 13 (`ls`).
-The five filesystem commands other than `mkdir` (`cat`, `cp`, `mv`, `rm`, `ls`) are still
-stubs reporting `<name>: not implemented yet`.
+Done: tasks 1 through 23, and 25. Every command in the subject is implemented and every
+mandatory audit item passes. No stubs remain.
+Open: task 24, the bonus question, which `PLAN.md` still declares out of scope. Nothing to do
+unless that decision changes.
 
 ## Verification
 
 Every entry above was left with `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
-warning-free, and every test passing (31 as of task 4).
+warning-free, and every test passing (132 as of task 23).

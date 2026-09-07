@@ -1,9 +1,9 @@
 use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use super::options::{self, Invalid};
+use super::transfer::{self, CP, Command};
 use crate::commands::report;
 
 /// Copies each source operand to the destination.
@@ -38,52 +38,35 @@ where
 
     let into_directory = destination.is_dir();
     if sources.len() > 1 && !into_directory {
-        return report_bad_target(destination, errors);
+        return transfer::report_bad_target(CP, destination, errors);
     }
 
     for source in sources {
         let source = Path::new(source);
-        let target = if into_directory {
-            match source.file_name() {
-                Some(name) => destination.join(name),
-                None => {
-                    let subject = format!(
-                        "cannot copy {} into {}",
-                        report::quoted(source),
-                        report::quoted(destination)
-                    );
-                    report::detail("cp", &subject, "Invalid argument", errors)?;
-                    continue;
-                }
-            }
-        } else {
-            destination.to_path_buf()
+        let Some(target) = transfer::target_for(CP, source, destination, into_directory, errors)?
+        else {
+            continue;
         };
 
-        copy(source, &target, recursive, errors)?;
+        copy(CP, source, &target, recursive, errors)?;
     }
 
     Ok(())
 }
 
-/// Explains why several sources cannot go to this destination.
-///
-/// The destination has to be a directory to hold them, so it either exists and
-/// is something else, or the reason it is not a directory is the OS's own.
-fn report_bad_target<E>(destination: &Path, errors: &mut E) -> io::Result<()>
-where
-    E: Write,
-{
-    let subject = format!("target {}", report::quoted(destination));
-
-    match destination.symlink_metadata() {
-        Ok(_) => report::detail("cp", &subject, "Not a directory", errors),
-        Err(error) => report::io_error("cp", &subject, &error, errors),
-    }
-}
-
 /// Copies one source to one fully resolved target path.
-fn copy<E>(source: &Path, target: &Path, recursive: bool, errors: &mut E) -> io::Result<()>
+///
+/// The answer is whether the copy is complete, which the caller needs and the
+/// `io::Result` does not carry: its `Err` is reserved for a failure to write to
+/// the error stream. `mv` deletes the source once a copy across a filesystem
+/// boundary has landed, and must not delete it on any other outcome.
+pub(super) fn copy<E>(
+    command: Command,
+    source: &Path,
+    target: &Path,
+    recursive: bool,
+    errors: &mut E,
+) -> io::Result<bool>
 where
     E: Write,
 {
@@ -100,7 +83,8 @@ where
         Ok(metadata) => metadata,
         Err(error) => {
             let subject = format!("cannot stat {}", report::quoted(source));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     };
     let file_type = metadata.file_type();
@@ -111,47 +95,60 @@ where
                 "-r not specified; omitting directory {}",
                 report::quoted(source)
             );
-            return report::message("cp", &text, errors);
+            report::message(command.name, &text, errors)?;
+            return Ok(false);
         }
-        return copy_directory(source, target, &metadata, errors);
+        return copy_directory(command, source, target, &metadata, errors);
     }
 
     if file_type.is_symlink() {
-        return copy_symlink(source, target, errors);
+        return copy_symlink(command, source, target, errors);
     }
 
     if file_type.is_file() {
-        return copy_file(source, target, &metadata, errors);
+        return copy_file(command, source, target, &metadata, errors);
     }
 
     // Devices, FIFOs, and sockets need a node the standard library cannot
     // create, and reading a FIFO would hang the shell until something writes
     // to it, so they are skipped rather than half copied.
     let text = format!("omitting special file {}", report::quoted(source));
-    report::message("cp", &text, errors)
+    report::message(command.name, &text, errors)?;
+    Ok(false)
 }
 
 /// Copies a regular file, then gives the copy the source's permissions.
-fn copy_file<E>(source: &Path, target: &Path, metadata: &Metadata, errors: &mut E) -> io::Result<()>
+fn copy_file<E>(
+    command: Command,
+    source: &Path,
+    target: &Path,
+    metadata: &Metadata,
+    errors: &mut E,
+) -> io::Result<bool>
 where
     E: Write,
 {
     // Creating the target truncates it, so a copy onto the source itself would
     // destroy the very bytes it is about to read.
-    if is_same_file(metadata, target) {
+    if target
+        .metadata()
+        .is_ok_and(|target| transfer::is_same_file(metadata, &target))
+    {
         let text = format!(
             "{} and {} are the same file",
             report::quoted(source),
             report::quoted(target)
         );
-        return report::message("cp", &text, errors);
+        report::message(command.name, &text, errors)?;
+        return Ok(false);
     }
 
     let mut reader = match File::open(source) {
         Ok(file) => file,
         Err(error) => {
             let subject = format!("cannot open {} for reading", report::quoted(source));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     };
 
@@ -159,29 +156,38 @@ where
         Ok(file) => file,
         Err(error) => {
             let subject = format!("cannot create regular file {}", report::quoted(target));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     };
 
     if let Err(error) = io::copy(&mut reader, &mut writer) {
         let subject = format!(
-            "cannot copy {} to {}",
+            "cannot {} {} to {}",
+            command.verb,
             report::quoted(source),
             report::quoted(target)
         );
-        return report::io_error("cp", &subject, &error, errors);
+        report::io_error(command.name, &subject, &error, errors)?;
+        return Ok(false);
     }
 
     if let Err(error) = writer.set_permissions(metadata.permissions()) {
         let subject = format!("preserving permissions for {}", report::quoted(target));
-        return report::io_error("cp", &subject, &error, errors);
+        report::io_error(command.name, &subject, &error, errors)?;
+        return Ok(false);
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Recreates a symlink at the target, pointing at the same place.
-fn copy_symlink<E>(source: &Path, target: &Path, errors: &mut E) -> io::Result<()>
+fn copy_symlink<E>(
+    command: Command,
+    source: &Path,
+    target: &Path,
+    errors: &mut E,
+) -> io::Result<bool>
 where
     E: Write,
 {
@@ -189,7 +195,8 @@ where
         Ok(link) => link,
         Err(error) => {
             let subject = format!("cannot read symbolic link {}", report::quoted(source));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     };
 
@@ -201,29 +208,33 @@ where
 
     if let Err(error) = std::os::unix::fs::symlink(&link, target) {
         let subject = format!("cannot create symbolic link {}", report::quoted(target));
-        return report::io_error("cp", &subject, &error, errors);
+        report::io_error(command.name, &subject, &error, errors)?;
+        return Ok(false);
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Copies a directory and everything under it.
 fn copy_directory<E>(
+    command: Command,
     source: &Path,
     target: &Path,
     metadata: &Metadata,
     errors: &mut E,
-) -> io::Result<()>
+) -> io::Result<bool>
 where
     E: Write,
 {
-    if is_inside(source, target) {
+    if transfer::is_inside(source, target) {
         let text = format!(
-            "cannot copy a directory, {}, into itself, {}",
+            "cannot {} a directory, {}, into itself, {}",
+            command.verb,
             report::quoted(source),
             report::quoted(target)
         );
-        return report::message("cp", &text, errors);
+        report::message(command.name, &text, errors)?;
+        return Ok(false);
     }
 
     match fs::create_dir(target) {
@@ -232,7 +243,8 @@ where
         Err(error) if error.kind() == ErrorKind::AlreadyExists && target.is_dir() => {}
         Err(error) => {
             let subject = format!("cannot create directory {}", report::quoted(target));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     }
 
@@ -240,16 +252,25 @@ where
         Ok(entries) => entries,
         Err(error) => {
             let subject = format!("cannot open {} for reading", report::quoted(source));
-            return report::io_error("cp", &subject, &error, errors);
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
         }
     };
 
+    // Every entry is attempted even after one fails, so a single unreadable
+    // file does not strand the rest of the tree. `mv` needs the running answer:
+    // a partial copy must not have its source removed.
+    let mut complete = true;
     for entry in entries {
         match entry {
-            Ok(entry) => copy(&entry.path(), &target.join(entry.file_name()), true, errors)?,
+            Ok(entry) => {
+                let target = target.join(entry.file_name());
+                complete &= copy(command, &entry.path(), &target, true, errors)?;
+            }
             Err(error) => {
                 let subject = format!("cannot read directory {}", report::quoted(source));
-                report::io_error("cp", &subject, &error, errors)?;
+                report::io_error(command.name, &subject, &error, errors)?;
+                complete = false;
             }
         }
     }
@@ -258,46 +279,11 @@ where
     // otherwise stop its own contents from being written into the copy.
     if let Err(error) = fs::set_permissions(target, metadata.permissions()) {
         let subject = format!("preserving permissions for {}", report::quoted(target));
-        return report::io_error("cp", &subject, &error, errors);
+        report::io_error(command.name, &subject, &error, errors)?;
+        return Ok(false);
     }
 
-    Ok(())
-}
-
-/// Whether the target is the very file described by `metadata`.
-///
-/// Compared by device and inode rather than by path text, so `a` and `./a`, and
-/// a hard link to either, are all recognised as the same file.
-fn is_same_file(metadata: &Metadata, target: &Path) -> bool {
-    match target.metadata() {
-        Ok(target) => target.dev() == metadata.dev() && target.ino() == metadata.ino(),
-        Err(_) => false,
-    }
-}
-
-/// Whether the target sits inside the source directory.
-///
-/// `cp -r dir dir/copy` would otherwise copy the growing tree into itself and
-/// never finish. Both paths are resolved first so that `.`, `..`, and links
-/// cannot hide the nesting. A target that does not exist yet is resolved
-/// through its parent, which does.
-fn is_inside(source: &Path, target: &Path) -> bool {
-    let Ok(source) = source.canonicalize() else {
-        return false;
-    };
-
-    let target = match target.canonicalize() {
-        Ok(target) => target,
-        Err(_) => match (target.parent(), target.file_name()) {
-            (Some(parent), Some(name)) => match parent.canonicalize() {
-                Ok(parent) => parent.join(name),
-                Err(_) => return false,
-            },
-            _ => return false,
-        },
-    };
-
-    target.starts_with(source)
+    Ok(complete)
 }
 
 #[cfg(test)]
@@ -306,7 +292,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::cp;
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

@@ -83,21 +83,10 @@ where
 mod tests {
     use std::env;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use super::{change_directory, echo, exit, pwd};
     use crate::commands::CommandAction;
-
-    static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
-
-    struct RestoreDirectory(PathBuf);
-
-    impl Drop for RestoreDirectory {
-        fn drop(&mut self) {
-            env::set_current_dir(&self.0).expect("failed to restore test directory");
-        }
-    }
+    use crate::testing::WorkingDirectory;
 
     #[test]
     fn echo_prints_a_blank_line_without_arguments() {
@@ -120,7 +109,7 @@ mod tests {
 
     #[test]
     fn pwd_prints_the_current_directory() {
-        let _lock = CURRENT_DIR_LOCK.lock().unwrap();
+        let _directory = WorkingDirectory::hold();
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let current_dir = env::current_dir().unwrap();
@@ -149,10 +138,8 @@ mod tests {
 
     #[test]
     fn cd_changes_to_the_requested_directory() {
-        let _lock = CURRENT_DIR_LOCK.lock().unwrap();
-        let original = env::current_dir().unwrap();
-        let _restore = RestoreDirectory(original.clone());
-        let target = original.parent().unwrap().to_path_buf();
+        let directory = WorkingDirectory::hold();
+        let target = directory.original().parent().unwrap().to_path_buf();
         let args = vec![target.to_string_lossy().into_owned()];
         let mut errors = Vec::new();
 
@@ -164,10 +151,13 @@ mod tests {
 
     #[test]
     fn cd_without_an_argument_uses_home() {
-        let _lock = CURRENT_DIR_LOCK.lock().unwrap();
-        let original = env::current_dir().unwrap();
-        let _restore = RestoreDirectory(original.clone());
-        let target = original.parent().unwrap().as_os_str().to_owned();
+        let directory = WorkingDirectory::hold();
+        let target = directory
+            .original()
+            .parent()
+            .unwrap()
+            .as_os_str()
+            .to_owned();
         let mut errors = Vec::new();
 
         change_directory(&[], Some(target.clone()), &mut errors).unwrap();
@@ -178,14 +168,13 @@ mod tests {
 
     #[test]
     fn cd_reports_invalid_input_without_changing_directory() {
-        let _lock = CURRENT_DIR_LOCK.lock().unwrap();
-        let original = env::current_dir().unwrap();
+        let directory = WorkingDirectory::hold();
         let mut errors = Vec::new();
 
         change_directory(&[], None, &mut errors).unwrap();
         change_directory(&["one".to_string(), "two".to_string()], None, &mut errors).unwrap();
 
-        assert_eq!(env::current_dir().unwrap(), original);
+        assert_eq!(env::current_dir().unwrap(), directory.original());
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             "cd: HOME not set\ncd: too many arguments\n"

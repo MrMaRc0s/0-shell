@@ -71,8 +71,8 @@ mod tests {
     use std::fs;
 
     use super::{CommandAction, dispatch};
-    use crate::commands::filesystem::testing::TempDir;
     use crate::parser::ParsedCommand;
+    use crate::testing::TempDir;
 
     fn run(line: &[&str]) -> (String, String, CommandAction) {
         let command = ParsedCommand {
@@ -121,19 +121,36 @@ mod tests {
         assert!(output.starts_with("-rw"), "ls -l: {output}");
         assert!(errors.is_empty(), "ls -l: {errors}");
 
+        let moved = temp.arg("made/moved.txt");
+        let (_, errors, _) = run(&["mv", &copy, &moved]);
+        assert!(errors.is_empty(), "mv: {errors}");
+        assert_eq!(fs::read(&moved).unwrap(), b"dispatched\n");
+
         let (_, errors, _) = run(&["rm", "-r", &made]);
         assert!(errors.is_empty(), "rm: {errors}");
         assert!(fs::metadata(&made).is_err(), "rm left the directory behind");
     }
 
     #[test]
-    fn the_mv_arm_reaches_mv_rather_than_the_unknown_command_path() {
-        // Task 7 has not landed yet, so `mv` still answers with its own
-        // message. What this pins is the wiring: the name must reach the
-        // command, whatever the command has to say.
-        let (_, errors, action) = run(&["mv", "source", "target"]);
+    fn the_mv_arm_moves_and_reports_through_the_dispatcher() {
+        let temp = TempDir::new("dispatch_mv");
+        let source = temp.arg("source.txt");
+        let target = temp.arg("target.txt");
+        fs::write(&source, b"moved\n").unwrap();
 
-        assert!(errors.starts_with("mv: "), "mv: {errors}");
+        let (output, errors, action) = run(&["mv", &source, &target]);
+
+        assert!(output.is_empty(), "mv: {output}");
+        assert!(errors.is_empty(), "mv: {errors}");
+        assert_eq!(fs::read(&target).unwrap(), b"moved\n");
+        assert!(fs::symlink_metadata(&source).is_err(), "source survived");
+        assert_eq!(action, CommandAction::Continue);
+
+        // A failure has to come back through the same arm rather than reaching
+        // the unknown-command path.
+        let (_, errors, action) = run(&["mv", &temp.arg("nope.txt"), &target]);
+
+        assert!(errors.starts_with("mv: cannot stat "), "mv: {errors}");
         assert_eq!(action, CommandAction::Continue);
     }
 

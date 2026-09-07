@@ -87,7 +87,7 @@ mod tests {
     use std::fs;
 
     use super::{BLOCK_SIZE, cat};
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     fn write(temp: &TempDir, name: &str, contents: &[u8]) -> String {
         let path = temp.arg(name);

@@ -243,7 +243,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::ls;
-    use crate::commands::filesystem::testing::TempDir;
+    use crate::testing::TempDir;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

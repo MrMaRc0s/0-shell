@@ -55,16 +55,34 @@
 //! * `rm: refusing to remove '.' or '..' directory: skipping '<path>'`
 //! * `rm: it is dangerous to operate recursively on '<path>'` (the root failsafe)
 //! * `cp: -r not specified; omitting directory '<path>'`
-//! * `cp: target '<dst>': Not a directory` (several sources, one plain target)
-//! * `cp: '<src>' and '<dst>' are the same file`
-//! * `cp: cannot copy a directory, '<src>', into itself, '<dst>'`
 //! * `cp: omitting special file '<src>'` (a device, FIFO, or socket)
+//! * `mv: cannot move '<src>' to a subdirectory of itself, '<dst>'`
+//!
+//! `cp` and `mv` share their transfer code, so they share these, each naming
+//! itself and its own verb (`copy` or `move`):
+//!
+//! * `<command>: target '<dst>': Not a directory` (several sources, one plain
+//!   target)
+//! * `<command>: '<src>' and '<dst>' are the same file`
+//! * `<command>: cannot <verb> a directory, '<src>', into itself, '<dst>'`
+//! * `<command>: cannot <verb> '<src>' into '<dst>': Invalid argument` (a
+//!   source with no basename to join, such as `..`)
+//!
+//! `mv` reaches the copy and removal messages by a second route. A rename
+//! cannot cross a filesystem boundary, and the fallback for that runs the same
+//! code `cp -r` and `rm -r` do, so a cross-device move can report
+//! `mv: cannot create regular file '<dst>': <reason>` or
+//! `mv: cannot remove '<src>': <reason>`. GNU's `mv` shares its transfer code
+//! the same way and reports the same shapes.
 //!
 //! Unknown flags use the wording `getopt` produces, again without the
 //! `Try '<command> --help'` line:
 //!
 //! * `cp: invalid option -- 'q'`
 //! * `cp: unrecognized option '--bogus'`
+//!
+//! `mv` accepts no options at all, but still parses them, so that `-q` is
+//! refused as an option rather than taken for a filename.
 //!
 //! ## `<reason>` comes from the OS, with the Rust suffix removed
 //!
@@ -83,9 +101,7 @@ mod mkdir;
 mod mv;
 mod options;
 mod rm;
-
-#[cfg(test)]
-pub(super) mod testing;
+mod transfer;
 
 pub use cat::cat;
 pub use cp::cp;
