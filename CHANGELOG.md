@@ -7,6 +7,36 @@ Format: `Task # - Action - Quick Summary`
 
 ### Phase 2 - Filesystem commands
 
+- **Tasks 13 and 14 - Verified, not rewritten - Flag clustering and the dispatcher were already done.**
+  Both tasks were satisfied by earlier work, so this entry records the check rather than a
+  change. Task 13's clustering came free with the shared parser in task 6: flags are read in
+  any position, clustered flags are expanded, `--` ends them, and an unknown one is refused
+  with `ls: invalid option -- 'x'` instead of being taken for a filename. Task 14's six arms
+  went into `dispatch` when each command was written.
+  Confirmed against the host: `ls -l -a -F`, `ls -laF`, `ls -al`, `ls -aFl`, `ls -F -l`,
+  a repeated flag, `ls --`, and `ls -a -- sub` all produce byte identical output, the audit's
+  own spelling included. The first run of that comparison showed differences that were the
+  harness's fault, not the shell's: both runs shared one directory, so a file the host's `cp`
+  created was listed by the shell's run afterwards. Re-run with a directory each, the only
+  remaining difference was the link count of `..`, which is the parent the two runs were
+  sitting in.
+  What the check did turn up, all of it deliberate rather than broken:
+  `ls -x` and `ls -lah` are host flags this shell does not have, so they report an invalid
+  option; only `-l`, `-a`, and `-F` are in scope. And `ls --bogus` is one of the few places
+  the host disagrees with GNU: uutils prints a clap style usage block, GNU prints
+  `ls: unrecognized option '--bogus'`, and so do we, matching GNU and this project's own
+  convention. `cp --bogus` and `rm --bogus` on the host print the GNU wording too, so the
+  host is inconsistent with itself here.
+  Added dispatcher tests, since task 14 is PLAN.md's integration point between the two
+  developers and nothing was proving it held: one test drives `mkdir`, `cat`, `cp`, `ls`,
+  `ls -l`, and `rm` through `dispatch` and checks the filesystem afterwards, another pins
+  `echo`, `pwd`, and `exit`, and a third pins the unknown-command message. The `mv` arm has
+  its own test that asserts only that the name reaches `mv` rather than the unknown-command
+  path, whatever `mv` answers, so it keeps holding when task 7 lands.
+  Still open: task 7. The `mv` arm is registered and routes correctly, but the command behind
+  it is the stub that prints `mv: not implemented yet`. It is the last unimplemented command
+  in the project.
+
 - **Task 12 - Implemented `ls -l` - The long format, with the calendar and the name lookups written by hand.**
   Split into `filesystem/ls/`: the command and its blocks in `mod.rs`, the rows and their
   columns in `long.rs`, `/etc/passwd` and `/etc/group` in `users.rs`, and the clock in

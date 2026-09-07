@@ -85,7 +85,7 @@ mod options;
 mod rm;
 
 #[cfg(test)]
-mod testing;
+pub(super) mod testing;
 
 pub use cat::cat;
 pub use cp::cp;
