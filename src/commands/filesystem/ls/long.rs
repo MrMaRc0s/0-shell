@@ -10,10 +10,11 @@ use super::time::{Zone, stamp};
 use super::users::Names;
 use crate::commands::report;
 
-/// One thing to list: the name to print, and where to find it.
+/// One thing to list: the name to print, where to find it, and its color.
 pub struct Item {
     pub display: Vec<u8>,
     pub path: PathBuf,
+    pub style: Option<&'static [u8]>,
 }
 
 /// The size column holds a byte count, or a device's two numbers.
@@ -32,6 +33,7 @@ struct Row {
     time: String,
     name: Vec<u8>,
     target: Option<Vec<u8>>,
+    style: Option<&'static [u8]>,
 }
 
 /// Writes the long listing, with the `total` line when this is a directory.
@@ -43,6 +45,7 @@ pub fn write<W, E>(
     items: &[Item],
     directory: bool,
     classify: bool,
+    colored: bool,
     output: &mut W,
     errors: &mut E,
 ) -> io::Result<()>
@@ -79,6 +82,11 @@ where
             name.extend_from_slice(super::indicator(&metadata, true).as_bytes());
         }
 
+        // The color is looked up from the same metadata, so a link reads as a
+        // link even though the listing followed it to describe what the entry
+        // itself is made up of.
+        let style = item.style.or_else(|| super::style_of(&metadata, colored));
+
         rows.push(Row {
             mode: mode_string(&metadata),
             links: metadata.nlink().to_string(),
@@ -88,6 +96,7 @@ where
             time: stamp(metadata.mtime(), now, &zone),
             name,
             target: read_target(&metadata, &item.path),
+            style,
         });
     }
 
@@ -182,7 +191,14 @@ where
     }
 
     write!(output, " {} ", row.time)?;
+
+    if let Some(color) = row.style {
+        output.write_all(color)?;
+    }
     output.write_all(&row.name)?;
+    if row.style.is_some() {
+        output.write_all(super::RESET)?;
+    }
 
     if let Some(target) = &row.target {
         output.write_all(b" -> ")?;

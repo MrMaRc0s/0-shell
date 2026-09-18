@@ -32,12 +32,12 @@ The implementation order and two-developer work split are recorded in
 | `cd`    | none | One operand, or none for `$HOME`. |
 | `exit`  | none | Rejects any argument. |
 | `clear` | none | Clears the screen and its scrollback (past commands) and homes the cursor, so the shell is left alone at the top. Arguments are ignored. |
-| `mkdir` | none | One or more directories. No `-p`: each parent has to exist already. |
-| `cat`   | none | One or more files, streamed as raw bytes. |
+| `mkdir` | `-p` | One or more directories. `-p` creates each operand's missing parents in one go and passes over a directory that already exists; without it each parent has to exist already. |
+| `cat`   | none | One or more files, streamed as raw bytes, or a redirected file read as standard input. |
 | `cp`    | `-r`, `-R` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. |
 | `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
 | `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
-| `ls`    | `-l`, `-a`, `-F` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. |
+| `ls`    | `-l`, `-a`, `-F` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. |
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 
 Options may appear in any position, `--` ends option parsing, and an unknown
@@ -47,6 +47,23 @@ filename.
 Anything else is reported as `Command 'name' not found`, and the shell carries
 on. No command aborts the shell, and a failing operand never stops the ones
 after it: `rm present missing other` removes both `present` and `other`.
+
+## Redirecting input and output
+
+`>` writes a command's output to a file, creating or emptying it; `>>` appends
+to a file, creating it if needed; `<` feeds a file to a command's input. The
+last redirection to a stream wins, and several apply left to right. `> file`
+alone still creates the file, as it does in any POSIX shell. A redirection that
+cannot be opened stops only its command —
+`0-shell: cannot create 'x': Permission denied` — and the shell carries on.
+`cat` reads a redirected file as standard input, and labels a read error on it
+`cat: (standard input)`. `>>`, `>`, and `<` are recognised only outside quotes,
+so a file name can genuinely contain them.
+
+On a real terminal, `ls` also colours its output the way GNU's `--color=auto`
+does: directories in bold blue, executables in bold green, FIFOs in yellow,
+sockets and symlinks in their own colours. Piped or redirected output is plain
+bytes, exactly as before.
 
 ### What `cp` and `mv` do with the awkward cases
 
@@ -71,11 +88,12 @@ it, which is what makes the three bonus features below possible. Piped or
 redirected input takes the plain path instead, unchanged and unaware any of this
 exists, so scripts and the audit transcript behave exactly as they always did.
 
-The editor talks to the kernel through the Linux `TCSETS`/`TCGETS` ioctls, so
-its raw-mode detection succeeds only on a Linux terminal. Elsewhere — piped
-input, or a non-Linux terminal such as macOS — the shell detects it cannot
-enter raw mode and takes the plain reading path, so every required behaviour is
-still present and only the three bonus features are absent.
+The editor talks to the kernel through the `TCSETS`/`TCGETS` ioctls, issued by
+the shell itself (the only assembly in the project). Each supported system uses
+its own kernel's constants and calling convention — Linux and macOS both get
+raw mode. On any other system, or when input is piped, the shell detects it
+cannot enter raw mode and takes the plain reading path, so every required
+behaviour is still present and only the three bonus features are absent.
 
 | Key | Does |
 |---|---|

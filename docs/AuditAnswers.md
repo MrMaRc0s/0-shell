@@ -60,10 +60,10 @@ reading the system's compiled timezone file, with the calendar arithmetic in
 terminal into raw mode by issuing the `TCGETS` and `TCSETS` ioctls itself, in
 `src/terminal/raw.rs`.
 
-That last one is the only `unsafe` in the project and the only assembly: about
-sixty lines holding the Linux system-call instruction for x86_64 and aarch64,
-with a documented safety note on each call. It is worth being plain about why it
-is there, because a grep for `asm!` will find it. A system call is not a spawned
+That last one is the only `unsafe` in the project and the only assembly: the
+system-call instruction for x86_64 and aarch64 on both Linux and macOS, with a
+documented safety note on each call. It is worth being plain about why it is
+there, because a grep for `asm!` will find it. A system call is not a spawned
 program: this is the same `ioctl` a C program would reach through libc, and the
 subject's own resources point at `man 2` pages for exactly this kind of work.
 The forbidden thing would have been to run `stty`, which is the easy way to set
@@ -78,7 +78,8 @@ process.
 
 **Answer:** Yes. `./target/release/0-shell` starts, prints its prompt, and reads
 commands until told to stop. It runs the required command set (`echo`, `pwd`,
-`cd`, `exit`, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`), reports anything else as
+`cd`, `exit`, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, plus `touch` and `clear`
+added on the `devcemv` branch), reports anything else as
 an unknown command, and keeps going after every error.
 
 ---
@@ -182,10 +183,14 @@ $ pwd
 
 Both children were created and `pwd` reported the new directory correctly.
 
-Note that `mkdir` has no `-p` here, so each parent has to exist before its
-child. That is why the three commands above are given separately, which is also
-how the audit words the step. `mkdir a/b/c` with no `a` reports
-`mkdir: cannot create directory 'a/b/c': No such file or directory`.
+Note that a plain `mkdir` needs each parent to exist before its child, which
+is why the three commands above are given separately — also how the audit
+words the step. `mkdir a/b/c` with no `a` reports
+`mkdir: cannot create directory 'a/b/c': No such file or directory`. On the
+`devcemv` branch this was extended with GNU's `-p`: `mkdir -p a/b/c` now
+creates the whole chain in one go and passes over an operand that already
+exists as a directory. The long spelling `--parents` is refused like every
+long option in this shell.
 
 ---
 
@@ -456,7 +461,7 @@ Observed at a real terminal:
 
 ```
 ec      + Tab  ->  echo
-c       + Tab  ->  lists: cat  cd  cp
+c       + Tab  ->  lists: cat  cd  clear  cp
 ls pro  + Tab  ->  ls project/
 ls al   + Tab  ->  lists: album.txt  alpha.txt
 ```
@@ -476,16 +481,28 @@ command; `|` is passed through as an ordinary argument.
 
 **Question:** Did the student add colors to the errors or directories?
 
-**Answer:** No. Output is uncoloured. This was a deliberate choice as well as a
-scope one: the audit compares output against the host terminal, and colour codes
-would show up as differences in that comparison.
+**Answer:** Yes, to directories (and the rest of the file kinds, following GNU's
+own `LS_COLORS` defaults) — but only on a real terminal. The colour decision is
+GNU's `--color=auto`: a pipe or script receives exactly the bytes it always did,
+so the audit's side-by-side comparisons and its `ls | cat` transcript are
+unchanged, while a human at a terminal sees directories in bold blue, executables
+in bold green, FIFOs in yellow, sockets and symlinks in their own colours. Errors
+are deliberately left uncoloured: the host tools do not colour them, and the
+comparison with the host stays byte for byte.
 
 ---
 
 **Question:** Did the student implement redirection?
 
-**Answer:** No. Not implemented, and out of scope per `PLAN.md`. `>` and `<` are
-ordinary arguments.
+**Answer:** Yes. `>` writes a command's output to a file (created or emptied),
+`>>` appends to it, and `<` feeds a file to a command's input — most usefully
+`cat`, which then reads it as standard input and labels read errors
+`cat: (standard input)`. A redirection that cannot be opened stops only that
+command (`0-shell: cannot create 'x': Permission denied`), and the shell carries
+on. The GNU rules are followed where they matter: `> file` with no command still
+creates the file, the last redirection to a stream wins, several redirections
+apply left to right, and a stray `>` with no destination is a parse error
+(`syntax error near unexpected token 'newline'`).
 
 ---
 
@@ -498,9 +515,11 @@ so it matches what the audit expects to see.
 
 **Question:** Did the student add any other features or commands to the project?
 
-**Answer:** No extra commands, but two further bonuses from the subject's list
-are implemented, and the required commands go beyond the minimum in several
-places.
+**Answer:** Two extra commands were added on the `devcemv` branch — `touch`
+(create a file if missing, otherwise stamp its timestamps, with GNU's `-c`,
+`-a`, and `-m`) and `clear` (reset the screen and its scrollback) — alongside
+two further bonuses from the subject's list, and the required commands go
+beyond the minimum in several places.
 
 **Command history.** Up and Down walk through the lines entered this session.
 The half-typed line is kept when the walk starts, so Down returns to it. Blank
@@ -526,6 +545,9 @@ The required commands also go beyond the minimum:
   (`ls -laF`), tolerate repeats, and stop at `--`, so a file genuinely named
   `-r` is reachable as `mv -- -r target`. An unknown flag is refused
   (`ls: invalid option -- 'x'`) instead of being taken for a filename.
+* **`mkdir -p`,** which creates each operand's missing parents in one go and,
+  unlike a plain `mkdir`, silently passes over a directory that already exists.
+  Added on the `devcemv` branch.
 * **`cp -r` and `-R`,** including the real `cp` symlink rule: a plain copy
   follows a link and copies what it points at, a recursive copy recreates the
   link. Special files are reported and skipped rather than half copied.
@@ -542,5 +564,5 @@ The required commands also go beyond the minimum:
   removes both `present` and `other`. This was tested deliberately against
   missing operands, nonexistent paths, permission-denied paths, a file where a
   directory belongs, unclosed quotes, very long input, and binary files.
-* **168 automated tests**, including one that drives the shell through this
+* **212 automated tests**, including one that drives the shell through this
   audit's entire script and checks the result.

@@ -9,6 +9,9 @@ use crate::commands::report;
 /// file costs a fixed amount of memory.
 const BLOCK_SIZE: usize = 64 * 1024;
 
+/// What `-` stands for in an error about standard input.
+const STANDARD_INPUT: &str = "(standard input)";
+
 /// Which side of the copy failed.
 ///
 /// A failure to read the source is reported on `errors` and the remaining
@@ -29,21 +32,44 @@ enum Failure {
 ///
 /// An operand that cannot be read is reported and the rest are still printed,
 /// so `cat present missing other` prints both `present` and `other`.
-pub fn cat<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
+///
+/// `input` is standard input when the shell redirected it with `<`. With no
+/// operands, `cat` copies standard input, as GNU's does; the `-` operand means
+/// the same. Without a redirection there is no standard input to copy, so the
+/// operand-less form keeps the missing-operand error it always had.
+pub fn cat<W, E>(
+    args: &[String],
+    mut input: Option<&mut dyn Read>,
+    output: &mut W,
+    errors: &mut E,
+) -> io::Result<()>
 where
     W: Write,
     E: Write,
 {
     if args.is_empty() {
-        // GNU `cat` with no operands copies standard input, which this shell
-        // cannot offer: standard input is the line reader driving the prompt,
-        // and consuming it here would eat the next command.
-        return report::missing_operand("cat", errors);
+        return match input {
+            Some(reader) => stream_from(reader, output, errors),
+            None => report::missing_operand("cat", errors),
+        };
     }
 
     let mut block = vec![0u8; BLOCK_SIZE];
 
     for path in args {
+        if path == "-"
+            && let Some(reader) = input.as_deref_mut()
+        {
+            match copy(reader, &mut block, output) {
+                Ok(()) => {}
+                Err(Failure::Source(error)) => {
+                    report::io_error("cat", STANDARD_INPUT, &error, errors)?
+                }
+                Err(Failure::Output(error)) => return Err(error),
+            }
+            continue;
+        }
+
         match stream(path, &mut block, output) {
             Ok(()) => {}
             Err(Failure::Source(error)) => report::io_error("cat", path, &error, errors)?,
@@ -52,6 +78,22 @@ where
     }
 
     Ok(())
+}
+
+/// Copies a byte stream to the output, reporting read failures but never
+/// giving up on them.
+fn stream_from<W, E>(input: &mut dyn Read, output: &mut W, errors: &mut E) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    let mut block = vec![0u8; BLOCK_SIZE];
+
+    match copy(input, &mut block, output) {
+        Ok(()) => Ok(()),
+        Err(Failure::Source(error)) => report::io_error("cat", STANDARD_INPUT, &error, errors),
+        Err(Failure::Output(error)) => Err(error),
+    }
 }
 
 /// Copies one file to the output through `block`.
@@ -70,8 +112,16 @@ where
         return Err(Failure::Source(io::Error::other("Is a directory")));
     }
 
+    copy(&mut file, block, output)
+}
+
+/// Reads `block`-sized chunks from `source` and writes them to `output`.
+fn copy<W>(source: &mut dyn Read, block: &mut [u8], output: &mut W) -> Result<(), Failure>
+where
+    W: Write,
+{
     loop {
-        let read = match file.read(block) {
+        let read = match source.read(block) {
             Ok(0) => return Ok(()),
             Ok(read) => read,
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -85,6 +135,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Cursor;
 
     use super::{BLOCK_SIZE, cat};
     use crate::testing::TempDir;
@@ -95,14 +146,21 @@ mod tests {
         path
     }
 
+    fn run(paths: &[String], input: Option<&mut dyn std::io::Read>) -> (Vec<u8>, String) {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        cat(paths, input, &mut output, &mut errors).unwrap();
+
+        (output, String::from_utf8(errors).unwrap())
+    }
+
     #[test]
     fn prints_a_file_exactly_as_stored() {
         let temp = TempDir::new("cat_one");
         let path = write(&temp, "new_doc.txt", b"first line\nsecond line\n");
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert_eq!(output, b"first line\nsecond line\n");
         assert!(errors.is_empty());
@@ -112,10 +170,8 @@ mod tests {
     fn adds_no_newline_of_its_own() {
         let temp = TempDir::new("cat_no_newline");
         let path = write(&temp, "unterminated.txt", b"no trailing newline");
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert_eq!(output, b"no trailing newline");
         assert!(errors.is_empty());
@@ -125,10 +181,8 @@ mod tests {
     fn prints_an_empty_file_as_nothing() {
         let temp = TempDir::new("cat_empty");
         let path = write(&temp, "empty.txt", b"");
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert!(output.is_empty());
         assert!(errors.is_empty());
@@ -139,10 +193,8 @@ mod tests {
         let temp = TempDir::new("cat_binary");
         let contents = [0x00, 0xff, 0xfe, 0x80, b'\n', 0xc3];
         let path = write(&temp, "binary.bin", &contents);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert_eq!(output, contents);
         assert!(errors.is_empty());
@@ -153,10 +205,8 @@ mod tests {
         let temp = TempDir::new("cat_large");
         let contents: Vec<u8> = (0..BLOCK_SIZE * 2 + 17).map(|byte| byte as u8).collect();
         let path = write(&temp, "large.bin", &contents);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert_eq!(output, contents);
         assert!(errors.is_empty());
@@ -169,10 +219,8 @@ mod tests {
             write(&temp, "first.txt", b"first"),
             write(&temp, "second.txt", b"second\n"),
         ];
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(&args, &mut output, &mut errors).unwrap();
+        let (output, errors) = run(&args, None);
 
         assert_eq!(output, b"firstsecond\n");
         assert!(errors.is_empty());
@@ -187,14 +235,12 @@ mod tests {
             missing.clone(),
             write(&temp, "after.txt", b"after\n"),
         ];
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(&args, &mut output, &mut errors).unwrap();
+        let (output, errors) = run(&args, None);
 
         assert_eq!(output, b"before\nafter\n");
         assert_eq!(
-            String::from_utf8(errors).unwrap(),
+            errors,
             format!("cat: {missing}: No such file or directory\n")
         );
     }
@@ -204,26 +250,53 @@ mod tests {
         let temp = TempDir::new("cat_directory");
         let path = temp.arg("new_folder1");
         fs::create_dir(&path).unwrap();
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
 
-        cat(std::slice::from_ref(&path), &mut output, &mut errors).unwrap();
+        let (output, errors) = run(std::slice::from_ref(&path), None);
 
         assert!(output.is_empty());
-        assert_eq!(
-            String::from_utf8(errors).unwrap(),
-            format!("cat: {path}: Is a directory\n")
-        );
+        assert_eq!(errors, format!("cat: {path}: Is a directory\n"));
     }
 
     #[test]
     fn reports_missing_operands() {
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        cat(&[], &mut output, &mut errors).unwrap();
+        let (output, errors) = run(&[], None);
 
         assert!(output.is_empty());
-        assert_eq!(String::from_utf8(errors).unwrap(), "cat: missing operand\n");
+        assert_eq!(errors, "cat: missing operand\n");
+    }
+
+    #[test]
+    fn copies_standard_input_byte_for_byte_when_redirected() {
+        let mut input = Cursor::new(b"from <\nsecond line".to_vec());
+
+        let (output, errors) = run(&[], Some(&mut input));
+
+        assert_eq!(output, b"from <\nsecond line");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_dash_operand_reads_redirected_standard_input() {
+        let mut input = Cursor::new(b"piped".to_vec());
+        let args = vec![
+            "before.txt".to_string(),
+            "-".to_string(),
+            "after.txt".to_string(),
+        ];
+
+        // Only the `-` operand reaches the redirected stream; the other two
+        // names fail to open and are reported around it.
+        let mut input = Some(&mut input);
+        let input = input
+            .as_deref_mut()
+            .map(|reader| reader as &mut dyn std::io::Read);
+        let (output, errors) = run(&args, input);
+
+        assert_eq!(output, b"piped");
+        assert_eq!(
+            errors,
+            "cat: before.txt: No such file or directory\n\
+             cat: after.txt: No such file or directory\n"
+        );
     }
 }

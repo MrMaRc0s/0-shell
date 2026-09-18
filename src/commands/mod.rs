@@ -1,8 +1,8 @@
 mod filesystem;
-mod report;
+pub(crate) mod report;
 mod session;
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use crate::parser::ParsedCommand;
 
@@ -24,8 +24,10 @@ pub enum CommandAction {
 
 pub fn dispatch<W, E>(
     command: &ParsedCommand,
+    input: Option<&mut dyn Read>,
     output: &mut W,
     errors: &mut E,
+    colored: bool,
 ) -> io::Result<CommandAction>
 where
     W: Write,
@@ -54,7 +56,7 @@ where
             Ok(CommandAction::Continue)
         }
         "cat" => {
-            filesystem::cat(&command.args, output, errors)?;
+            filesystem::cat(&command.args, input, output, errors)?;
             Ok(CommandAction::Continue)
         }
         "cp" => {
@@ -70,7 +72,7 @@ where
             Ok(CommandAction::Continue)
         }
         "ls" => {
-            filesystem::ls(&command.args, output, errors)?;
+            filesystem::ls(&command.args, output, errors, colored)?;
             Ok(CommandAction::Continue)
         }
         "touch" => {
@@ -96,11 +98,12 @@ mod tests {
         let command = ParsedCommand {
             name: line[0].to_string(),
             args: line[1..].iter().map(|arg| arg.to_string()).collect(),
+            redirections: Vec::new(),
         };
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        let action = dispatch(&command, &mut output, &mut errors).unwrap();
+        let action = dispatch(&command, None, &mut output, &mut errors, false).unwrap();
 
         (
             String::from_utf8(output).unwrap(),

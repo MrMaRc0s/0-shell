@@ -54,7 +54,7 @@ Traceability (validator CONFIRMED): covered `F1-F7,F11,F13-F17,F19,B2/history`; 
 - [ ] **TEST-007 P1 — symlinks/recursive/specials** — dangling `cp` plain (`cannot stat`) vs `cp -r` (recreate link), `mv` dangling, `rm` dangling, `cat` symlink-to-file + dangling; `cp -r` merge-into-existing (`cp.rs:243`); unreadable-tree mid-walk (`complete=false`); `cp` FIFO/socket/device `omitting special file` (zero tests); `hard_link` same-file refused; `transfer::target_for` `..`/`/` → `Invalid argument` + multi-source missing-dest OS reason (only `Not a directory` tested `cp.rs:546`, `mv.rs:447`).
 - [ ] **TEST-008 P2 — I/O / FS robustness** — `cat` binary/`>BLOCK_SIZE`/no-newline/empty/multi already exemplary — add `cp/mv` binary/large round-trip, space-in-name for `cp/mv/cat` (only `ls` sort has it), non-UTF8 `OsString` (`ls` + `pwd` bytes, zero tests), `cat` `Failure::Output` via failing writer, `ls -l` stat-fails-mid-listing (`long.rs:68` continue), `EACCES` for `cat/mkdir/mv/ls-l`.
 - [ ] **TEST-009 P2 — harness quality (flake/skip hygiene)** — convert 4 silent `return` skips to explicit `eprintln!("SKIP …: root/same-fs")`: `rm.rs:341`, `ls/mod.rs:404`, `mv.rs:300,337`; guard `mv.rs:337` with `permissions_apply` (currently fails as root, unlike siblings); fix `remove_dir_all` leak on assert-panic in `0o500` fixtures (`rm.rs:341`, `ls/mod.rs:404` restore before assert or RAII guard); add `WorkingDirectory` restore/poison test; split mega `every_filesystem_command…` (`mod.rs:105`) per-command; audit `mod.rs:168` `pwd`-without-hold race claim (validator could not reproduce — re-check under `cargo test -- --test-threads=16` before changing).
-- [ ] **TEST-010 P2 — negative bonus pins** — `echo a|b` treats `|` literally, `echo hi > f` does NOT create `f` (no pipe/redirect — expected-absent but pinned); prompt stays literal `$ ` (already asserted `shell.rs:93,101,115,123,140,162` — keep).
+- [ ] **TEST-010 P2 — negative bonus pins** — `echo a|b` treats `|` literally (pipe still absent); redirection is now implemented, so pin the new behaviour instead: `echo hi > f` DOES create `f`, `>>` appends, `<` feeds stdin, `> f > g` → last wins, unstoppable `> /nowhere` stops only its command (`0-shell: cannot create …`), and a bare `>` is `syntax error near unexpected token 'newline'`; prompt stays literal `$ ` (already asserted `shell.rs:93,101,115,123,140,162` — keep).
 
 ## P3 — Docs
 
@@ -93,12 +93,18 @@ developed on macOS, where they did, and are now fixed:
   module issued Linux's `SYS_ioctl` number and `TCGETS`/`TCSETS` requests
   (`0x5401`/`0x5402`) on every x86_64/aarch64, which do not exist on Darwin; the
   test suite died with signal 12 and an interactive shell on a TTY would too.
-  **Fixed:** the syscall stubs, ioctl numbers, and struct are now compiled in
-  only when `target_os = "linux"`; elsewhere `get_settings`/`set_settings`
-  report `ENOTTY`, so `Terminal::new()` falls back to plain whole-line reading
-  (all required behaviour unchanged; only the editor bonus is absent, matching
-  the existing non-syscall-arch fallback). Constants `TCGETS/TCSETS` are gated
-  too. README documents the Linux-only editor.
+  **Interim fix:** the syscall stubs, ioctl numbers, and struct were compiled in
+  only when `target_os = "linux"`; elsewhere `ENOTTY` kept the shell on the plain
+  reading path with only the editor bonus absent.
+  **Final fix (`devcemv`):** raw mode was ported to Darwin instead of gated
+  away. The constants — `SYS_ioctl 54`, `TIOCGETA`/`TIOCSETA`
+  (`0x40487413`/`0x80487414`), the 72-byte `struct termios` — come from the
+  system's own headers, and the aarch64 code now uses Darwin's calling
+  convention (`svc 0x80`, number in `x16`) where Linux uses `svc 0` and `x8`.
+  Darwin also answers failures as the positive errno rather than Linux's
+  negated one, and `checked` was split per system for that. Verified on a real
+  pseudo-terminal: Tab completion, Ctrl+C survival, and history all work on
+  this Mac. README and the changelog record the editor on both Linux and macOS.
 - **MAC-002 — `ls -l` symlink mode test failed on macOS.** The test asserted
   GNU's `lrwxrwxrwx`, but the code printed the stored mode, and APFS keeps a
   symlink's creation mode (`0755` behind a normal umask). Linux's kernel always
@@ -108,5 +114,5 @@ developed on macOS, where they did, and are now fixed:
   matching the project's GNU-targeting charter.
 
 Verification of the whole session (this branch): `cargo fmt --check`, `cargo
-clippy -- -D warnings`, and `cargo test` — 177 passing. P0 items FIX-001..005
+clippy -- -D warnings`, and `cargo test` — 212 passing. P0 items FIX-001..005
 are checked off above.

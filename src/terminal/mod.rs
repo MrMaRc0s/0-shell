@@ -40,6 +40,14 @@ pub trait LineSource {
     fn next_line<W>(&mut self, prompt: &str, output: &mut W) -> io::Result<Line>
     where
         W: Write;
+
+    /// Whether the next prompt is drawn by moving the cursor back across the
+    /// screen. The person's editor draws it that way, and a command whose
+    /// output chose not to end with a newline would be overwritten by the
+    /// journey back. Plain reading writes the prompt in place, so it says no.
+    fn needs_fresh_line(&self) -> bool {
+        false
+    }
 }
 
 /// Lines read from a pipe, a file, or a test.
@@ -119,5 +127,9 @@ impl LineSource for Terminal {
         W: Write,
     {
         self.editor.read_line(prompt, &mut self.input, output)
+    }
+
+    fn needs_fresh_line(&self) -> bool {
+        true
     }
 }
