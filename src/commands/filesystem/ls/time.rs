@@ -20,11 +20,16 @@ const SECONDS_PER_DAY: i64 = 86_400;
 const SIX_MONTHS: i64 = 15_778_476;
 const HOUR: i64 = 3_600;
 
+/// The largest real zone file on a typical system is a few hundred bytes;
+/// 64 KiB is generous enough for any realistic file.
+const MAX_ZONE_FILE_SIZE: u64 = 64 * 1024;
+
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
 /// The local time zone: when each offset from UTC starts, and what it is.
+#[derive(Debug, PartialEq)]
 pub struct Zone {
     /// Transition timestamps, ascending.
     transitions: Vec<i64>,
@@ -59,6 +64,13 @@ impl Zone {
     }
 
     fn from_path(path: &PathBuf) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        if meta.len() > MAX_ZONE_FILE_SIZE {
+            return None;
+        }
         Self::from_tzif(&fs::read(path).ok()?)
     }
 
@@ -97,6 +109,12 @@ impl Zone {
         } else {
             (first, 44, 4)
         };
+
+        // A crafted header can claim counts that do not fit the data.  Reject
+        // the file before any allocation sized by those counts.
+        if !counts_fit(&counts, data.len(), start, width) {
+            return None;
+        }
 
         let mut transitions = Vec::with_capacity(counts.timecnt);
         for index in 0..counts.timecnt {
@@ -184,6 +202,21 @@ impl Counts {
     }
 }
 
+/// Checks that the header counts can actually fit inside the data slice.
+/// Returns false on overflow or when the tables would extend past the end.
+fn counts_fit(counts: &Counts, data_len: usize, start: usize, width: usize) -> bool {
+    let Some(trans) = start.checked_add(counts.timecnt.saturating_mul(width)) else {
+        return false;
+    };
+    let Some(indices) = trans.checked_add(counts.timecnt) else {
+        return false;
+    };
+    let Some(types_end) = indices.checked_add(counts.typecnt.saturating_mul(6)) else {
+        return false;
+    };
+    types_end <= data_len
+}
+
 /// Which zone file to read: what `TZ` names, or the system's own.
 fn zone_path() -> PathBuf {
     let Some(tz) = env::var_os("TZ") else {
@@ -258,7 +291,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Zone, civil_from_days, stamp};
+    use super::{MAX_ZONE_FILE_SIZE, Zone, civil_from_days, stamp};
+    use crate::testing::TempDir;
+    use std::fs;
 
     #[test]
     fn converts_days_to_civil_dates() {
@@ -316,5 +351,52 @@ mod tests {
             assert_eq!(offset % 60, 0, "offsets are whole minutes");
             assert!((-12 * 3_600..=14 * 3_600).contains(&offset));
         }
+    }
+
+    #[test]
+    fn a_header_claiming_huge_counts_is_rejected_before_allocating() {
+        // 44-byte header: magic + version + 4 reserved bytes + 6 counts.
+        let mut header = vec![0u8; 44];
+        header[0..4].copy_from_slice(b"TZif");
+        header[4] = b'1';
+        // isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt
+        let max = u32::MAX.to_be_bytes();
+        header[20..24].copy_from_slice(&max);
+        header[24..28].copy_from_slice(&max);
+        header[28..32].copy_from_slice(&max);
+        header[32..36].copy_from_slice(&max);
+        header[36..40].copy_from_slice(&max);
+        header[40..44].copy_from_slice(&max);
+
+        assert_eq!(Zone::from_tzif(&header), None);
+    }
+
+    #[test]
+    fn rejects_a_zone_source_that_is_not_a_regular_file() {
+        let tmp = TempDir::new("zone_test");
+        let dir = tmp.path().join("not_a_file");
+        fs::create_dir(&dir).unwrap();
+        assert_eq!(Zone::from_path(&dir), None);
+    }
+
+    #[test]
+    fn rejects_a_zone_file_above_the_size_cap() {
+        let tmp = TempDir::new("zone_test");
+        let path = tmp.path().join("big.zone");
+        let size = (MAX_ZONE_FILE_SIZE + 1) as usize;
+        let mut data = vec![0u8; size];
+        data[0..4].copy_from_slice(b"TZif");
+        fs::write(&path, &data).unwrap();
+        assert_eq!(Zone::from_path(&path), None);
+    }
+
+    #[test]
+    fn reads_a_valid_empty_zone_file_below_the_cap() {
+        let tmp = TempDir::new("zone_test");
+        let path = tmp.path().join("empty.zone");
+        let mut data = vec![0u8; 44];
+        data[0..4].copy_from_slice(b"TZif");
+        fs::write(&path, &data).unwrap();
+        assert!(Zone::from_path(&path).is_some());
     }
 }

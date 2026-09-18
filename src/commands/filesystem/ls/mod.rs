@@ -11,7 +11,48 @@ use std::path::{Path, PathBuf};
 
 use super::options::{self, Invalid};
 use crate::commands::report;
+use crate::signal;
 use long::Item;
+
+/// The escape sequence that ends a colored name. GNU coreutils uses `\e[0m`.
+pub(super) const RESET: &[u8] = b"\x1b[0m";
+
+/// The escape sequences that begin a colored name, GNU coreutils' defaults.
+const DIRECTORY: &[u8] = b"\x1b[01;34m";
+const SYMLINK: &[u8] = b"\x1b[01;36m";
+const FIFO: &[u8] = b"\x1b[33m";
+const SOCKET: &[u8] = b"\x1b[01;35m";
+const DEVICE: &[u8] = b"\x1b[01;33m";
+const EXECUTABLE: &[u8] = b"\x1b[01;32m";
+
+/// The color an entry should be printed in, or none.
+///
+/// This is not the whole of GNU's scheme, only the defaults that matter in a
+/// listing: directories, links, FIFOs, sockets, the special device files, and
+/// executables. Plain files carry nothing, exactly as they do on the host.
+pub(super) fn style_of(metadata: &Metadata, colored: bool) -> Option<&'static [u8]> {
+    if !colored {
+        return None;
+    }
+
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        Some(SYMLINK)
+    } else if file_type.is_dir() {
+        Some(DIRECTORY)
+    } else if file_type.is_fifo() {
+        Some(FIFO)
+    } else if file_type.is_socket() {
+        Some(SOCKET)
+    } else if file_type.is_char_device() || file_type.is_block_device() {
+        Some(DEVICE)
+    } else if file_type.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+        Some(EXECUTABLE)
+    } else {
+        None
+    }
+}
 
 /// Lists the named directories and files, or the working directory.
 ///
@@ -26,7 +67,10 @@ use long::Item;
 /// symlink, `|` for a FIFO, and `=` for a socket. `-l` prints the long format,
 /// a `total` line and one aligned row per entry. The flags combine in any
 /// spelling: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same command.
-pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
+///
+/// `colored` turns on GNU's name colors, and only ever for a real terminal. A
+/// piped listing and a redirected one stay byte-identical to the host tool.
+pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E, colored: bool) -> io::Result<()>
 where
     W: Write,
     E: Write,
@@ -78,7 +122,11 @@ where
 
         match metadata {
             Ok(metadata) if metadata.is_dir() => directories.push(operand),
-            Ok(metadata) => files.push((operand, indicator(&metadata, classify))),
+            Ok(metadata) => files.push((
+                operand,
+                indicator(&metadata, classify),
+                style_of(&metadata, colored),
+            )),
             Err(error) => {
                 let subject = format!("cannot access {}", report::quoted(operand));
                 report::io_error("ls", &subject, &error, errors)?;
@@ -97,21 +145,31 @@ where
         if long {
             let items = files
                 .iter()
-                .map(|(file, _)| Item {
+                .map(|(file, _, style)| Item {
                     display: file.as_bytes().to_vec(),
                     path: PathBuf::from(file),
+                    style: *style,
                 })
                 .collect::<Vec<_>>();
-            long::write(&items, false, classify, output, errors)?;
+            long::write(&items, false, classify, colored, output, errors)?;
         } else {
-            for (file, indicator) in files {
-                write_line(file.as_bytes(), indicator, output)?;
+            for (file, indicator, style) in files {
+                if signal::is_pending() {
+                    break;
+                }
+                write_line(file.as_bytes(), indicator, style, output)?;
             }
         }
         printed = true;
     }
 
     for directory in directories {
+        // A Ctrl+C stops the listing here, so the remaining directories keep
+        // their names and produce no empty blocks.
+        if signal::is_pending() {
+            break;
+        }
+
         let path = Path::new(directory);
         let names = match read_names(path, all) {
             Ok(names) => names,
@@ -139,16 +197,27 @@ where
                 .map(|name| Item {
                     display: name.as_bytes().to_vec(),
                     path: path.join(name),
+                    style: None,
                 })
                 .collect::<Vec<_>>();
-            long::write(&items, true, classify, output, errors)?;
+            long::write(&items, true, classify, colored, output, errors)?;
         } else {
             for name in names {
-                write_line(
-                    name.as_bytes(),
-                    entry_indicator(&path.join(&name), classify),
-                    output,
-                )?;
+                if signal::is_pending() {
+                    break;
+                }
+
+                let path = path.join(&name);
+                let metadata = path.symlink_metadata().ok();
+                let indicator = metadata
+                    .as_ref()
+                    .map(|metadata| indicator(metadata, classify))
+                    .unwrap_or("");
+                let style = metadata
+                    .as_ref()
+                    .and_then(|metadata| style_of(metadata, colored));
+
+                write_line(name.as_bytes(), indicator, style, output)?;
             }
         }
     }
@@ -170,7 +239,17 @@ fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
     }
 
     for entry in fs::read_dir(directory)? {
-        let name = entry?.file_name();
+        // A listing interrupted mid-read keeps the names collected so far
+        // rather than reporting the `EINTR` that woke the directory read.
+        if signal::is_pending() {
+            break;
+        }
+
+        let name = match entry {
+            Ok(entry) => entry.file_name(),
+            Err(_error) if signal::is_pending() => break,
+            Err(error) => return Err(error),
+        };
         if !all && name.as_bytes().first() == Some(&b'.') {
             continue;
         }
@@ -186,29 +265,27 @@ fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
 }
 
 /// Writes one name, its `-F` indicator, and a newline, as bytes.
-fn write_line<W>(name: &[u8], indicator: &str, output: &mut W) -> io::Result<()>
+///
+/// A colored name is wrapped between its color and the reset sequence, with
+/// the indicator inside the color, which is how GNU's `ls` draws it.
+fn write_line<W>(
+    name: &[u8],
+    indicator: &str,
+    style: Option<&'static [u8]>,
+    output: &mut W,
+) -> io::Result<()>
 where
     W: Write,
 {
+    if let Some(color) = style {
+        output.write_all(color)?;
+    }
     output.write_all(name)?;
     output.write_all(indicator.as_bytes())?;
+    if style.is_some() {
+        output.write_all(RESET)?;
+    }
     output.write_all(b"\n")
-}
-
-/// The `-F` indicator for a directory entry, looked up by path.
-///
-/// Asks about the link rather than its target, so a symlink is marked `@`
-/// whatever it points at. An entry that has gone since the directory was read
-/// simply gets no indicator.
-fn entry_indicator(path: &Path, classify: bool) -> &'static str {
-    if !classify {
-        return "";
-    }
-
-    match path.symlink_metadata() {
-        Ok(metadata) => indicator(&metadata, true),
-        Err(_) => "",
-    }
 }
 
 /// The character `-F` appends to a name of this kind.
@@ -259,7 +336,19 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        ls(operands.as_ref(), &mut output, &mut errors).unwrap();
+        ls(operands.as_ref(), &mut output, &mut errors, false).unwrap();
+
+        (
+            String::from_utf8(output).unwrap(),
+            String::from_utf8(errors).unwrap(),
+        )
+    }
+
+    fn listing_colored<W: AsRef<[String]>>(operands: W) -> (String, String) {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        ls(operands.as_ref(), &mut output, &mut errors, true).unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -710,5 +799,57 @@ sub/
         assert!(output.is_empty());
         assert_eq!(errors, "ls: invalid option -- 'q'\n");
         assert_eq!(long, "ls: unrecognized option '--bogus'\n");
+    }
+
+    #[test]
+    fn colored_listings_wrap_kinds_in_the_style_of_the_host() {
+        let temp = TempDir::new("ls_color");
+        let directory = temp.arg("sub");
+        fs::create_dir(&directory).unwrap();
+        let script = touch(&temp, "tool");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        touch(&temp, "plain");
+
+        let (output, _) = listing_colored(vec!["-F".to_string(), temp.arg("")]);
+
+        assert_eq!(
+            output,
+            "plain\n\x1b[01;34msub/\x1b[0m\n\x1b[01;32mtool*\x1b[0m\n"
+        );
+    }
+
+    #[test]
+    fn colored_listings_leave_the_color_off_when_asked() {
+        let temp = TempDir::new("ls_color_off");
+        let directory = temp.arg("sub");
+        fs::create_dir(&directory).unwrap();
+        touch(&temp, "plain");
+
+        let (plain, _) = listing(vec![temp.arg("")]);
+        let (colored, _) = listing_colored(vec![temp.arg("")]);
+
+        assert_eq!(plain, "plain\nsub\n");
+        assert_eq!(colored, "plain\n\x1b[01;34msub\x1b[0m\n");
+    }
+
+    #[test]
+    fn colored_long_rows_wrap_only_the_name_column() {
+        let temp = TempDir::new("ls_color_long");
+        let directory = temp.arg("sub");
+        fs::create_dir(&directory).unwrap();
+
+        let (output, _) = listing_colored(vec!["-l".to_string(), temp.arg("")]);
+
+        let rows: Vec<&str> = output.split('\n').skip(1).collect();
+        assert!(
+            rows[0].starts_with("drwxr-xr-x 2"),
+            "the columns before the name are untouched: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].ends_with("\x1b[01;34msub\x1b[0m"),
+            "only the name column is wrapped: {}",
+            rows[0]
+        );
     }
 }

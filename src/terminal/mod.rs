@@ -16,7 +16,7 @@ mod history;
 mod keys;
 mod raw;
 
-use std::io::{self, BufRead, IsTerminal, Stdin, Write};
+use std::io::{self, BufRead, ErrorKind, IsTerminal, Stdin, Write};
 
 use editor::Editor;
 use raw::RawMode;
@@ -29,6 +29,9 @@ pub enum Line {
     Interrupted,
     /// Input ended, by Ctrl+D at an empty prompt or by a pipe running dry.
     EndOfInput,
+    /// The line could not be decoded as UTF-8 (a piped line), the shell
+    /// reports it and keeps reading.
+    Invalid,
 }
 
 /// Somewhere the shell can ask for its next line.
@@ -37,6 +40,14 @@ pub trait LineSource {
     fn next_line<W>(&mut self, prompt: &str, output: &mut W) -> io::Result<Line>
     where
         W: Write;
+
+    /// Whether the next prompt is drawn by moving the cursor back across the
+    /// screen. The person's editor draws it that way, and a command whose
+    /// output chose not to end with a newline would be overwritten by the
+    /// journey back. Plain reading writes the prompt in place, so it says no.
+    fn needs_fresh_line(&self) -> bool {
+        false
+    }
 }
 
 /// Lines read from a pipe, a file, or a test.
@@ -64,12 +75,30 @@ where
         write!(output, "{prompt}")?;
         output.flush()?;
 
-        let mut line = String::new();
-        if self.input.read_line(&mut line)? == 0 {
-            return Ok(Line::EndOfInput);
-        }
+        // read_until stops at the byte rather than decoding it, so a line
+        // that is not valid UTF-8 is reported instead of ending the shell.
+        let mut bytes = Vec::new();
+        let bytes = loop {
+            match self.input.read_until(b'\n', &mut bytes) {
+                Ok(0) => return Ok(Line::EndOfInput),
+                Ok(_) => break bytes,
+                // A Ctrl+C with the terminal in its ordinary settings raises
+                // SIGINT, which wakes the blocked read. The handler has already
+                // recorded it; abandon the line and let the shell ask again.
+                Err(error) if error.kind() == ErrorKind::Interrupted => {
+                    if crate::signal::take() {
+                        return Ok(Line::Interrupted);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
-        Ok(Line::Entered(line))
+        match String::from_utf8(bytes) {
+            Ok(line) => Ok(Line::Entered(line)),
+            Err(_) => Ok(Line::Invalid),
+        }
     }
 }
 
@@ -111,5 +140,9 @@ impl LineSource for Terminal {
         W: Write,
     {
         self.editor.read_line(prompt, &mut self.input, output)
+    }
+
+    fn needs_fresh_line(&self) -> bool {
+        true
     }
 }

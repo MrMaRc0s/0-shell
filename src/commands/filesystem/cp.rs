@@ -5,6 +5,7 @@ use std::path::Path;
 use super::options::{self, Invalid};
 use super::transfer::{self, CP, Command};
 use crate::commands::report;
+use crate::signal;
 
 /// Copies each source operand to the destination.
 ///
@@ -42,6 +43,12 @@ where
     }
 
     for source in sources {
+        // One Ctrl+C answers for every remaining source: the rest of the tree
+        // is not started once the interrupt has arrived.
+        if signal::is_pending() {
+            break;
+        }
+
         let source = Path::new(source);
         let Some(target) = transfer::target_for(CP, source, destination, into_directory, errors)?
         else {
@@ -162,6 +169,12 @@ where
     };
 
     if let Err(error) = io::copy(&mut reader, &mut writer) {
+        // The handler does not restart system calls, so an interrupted read
+        // wakes as `EINTR`. A Ctrl+C is a silent stop, not a copy failure:
+        // whatever reached the target stays there, and no error is invented.
+        if signal::is_pending() {
+            return Ok(false);
+        }
         let subject = format!(
             "cannot {} {} to {}",
             command.verb,
@@ -191,6 +204,27 @@ fn copy_symlink<E>(
 where
     E: Write,
 {
+    // Recreating the link means removing the target first, so a link that
+    // resolves to its own destination would delete the very file it is about
+    // to name again: `cp -r link file1` with `link -> file1` leaves `file1` a
+    // self-loop and loses the contents. The followed source is measured
+    // against the target's own entry, as `copy_file` does for plain files;
+    // copying a link onto the link itself is a harmless recreation and passes,
+    // because the target's own entry is then the link.
+    if source.metadata().is_ok_and(|source| {
+        target
+            .symlink_metadata()
+            .is_ok_and(|target| transfer::is_same_file(&source, &target))
+    }) {
+        let text = format!(
+            "{} and {} are the same file",
+            report::quoted(source),
+            report::quoted(target)
+        );
+        report::message(command.name, &text, errors)?;
+        return Ok(false);
+    }
+
     let link = match fs::read_link(source) {
         Ok(link) => link,
         Err(error) => {
@@ -259,9 +293,15 @@ where
 
     // Every entry is attempted even after one fails, so a single unreadable
     // file does not strand the rest of the tree. `mv` needs the running answer:
-    // a partial copy must not have its source removed.
+    // a partial copy must not have its source removed. A Ctrl+C stops the walk
+    // right there and answers incomplete, which is exactly what `mv` needs to
+    // hear before it deletes its source.
     let mut complete = true;
     for entry in entries {
+        if signal::is_pending() {
+            return Ok(false);
+        }
+
         match entry {
             Ok(entry) => {
                 let target = target.join(entry.file_name());
@@ -518,6 +558,54 @@ mod tests {
             String::from_utf8(errors).unwrap(),
             format!("cp: '{source}' and '{same}' are the same file\n")
         );
+    }
+
+    #[test]
+    fn refuses_a_recursive_copy_of_a_link_onto_its_own_target() {
+        // `link -> file1` copied with `-r` onto `file1` recreates the link by
+        // deleting the target first, which would leave `file1` a self-loop and
+        // lose its contents.
+        let temp = TempDir::new("cp_r_symlink_target");
+        let target = write(&temp, "file1", b"precious\n");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("file1", &link).unwrap();
+        let mut errors = Vec::new();
+
+        cp(
+            &["-r".to_string(), link.clone(), target.clone()],
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            format!("cp: '{link}' and '{target}' are the same file\n")
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"precious\n",
+            "target destroyed"
+        );
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "source lost"
+        );
+    }
+
+    #[test]
+    fn copying_a_link_onto_itself_is_a_harmless_recreation() {
+        // `cp -r link link` removes and recreates the very same entry, so it
+        // must not be refused as a same-file copy.
+        let temp = TempDir::new("cp_r_link_self");
+        let file = write(&temp, "file1", b"still here\n");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("file1", &link).unwrap();
+        let mut errors = Vec::new();
+
+        cp(&["-r".to_string(), link.clone(), link], &mut errors).unwrap();
+
+        assert!(errors.is_empty());
+        assert_eq!(fs::read(&file).unwrap(), b"still here\n");
     }
 
     #[test]

@@ -1,23 +1,38 @@
 use std::fs;
 use std::io::{self, Write};
 
+use super::options::{self, Invalid};
 use crate::commands::report;
 
 /// Creates each named directory.
 ///
 /// A path that cannot be created is reported and the remaining operands are
 /// still attempted, so `mkdir good missing/child other` still creates both
-/// `good` and `other`.
+/// `good` and `other`. With `-p` the whole operand is created at once, any
+/// missing parents included, and a directory that already exists is passed
+/// over without a complaint, as GNU's flag behaves. The long spelling
+/// `--parents` is refused like every long option in this shell.
 pub fn mkdir<E>(args: &[String], errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    if args.is_empty() {
+    let parsed = match options::parse(args, "p") {
+        Ok(parsed) => parsed,
+        Err(Invalid::Short(flag)) => return report::invalid_option("mkdir", flag, errors),
+        Err(Invalid::Long(option)) => return report::unrecognized_option("mkdir", &option, errors),
+    };
+
+    if parsed.operands.is_empty() {
         return report::missing_operand("mkdir", errors);
     }
 
-    for path in args {
-        if let Err(error) = fs::create_dir(path) {
+    for path in &parsed.operands {
+        let result = if parsed.has('p') {
+            fs::create_dir_all(path)
+        } else {
+            fs::create_dir(path)
+        };
+        if let Err(error) = result {
             let subject = format!("cannot create directory {}", report::quoted(path));
             report::io_error("mkdir", &subject, &error, errors)?;
         }
@@ -112,6 +127,59 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             format!("mkdir: cannot create directory '{missing}': No such file or directory\n")
+        );
+    }
+
+    #[test]
+    fn p_creates_the_whole_chain_in_one_go() {
+        let temp = TempDir::new("mkdir_p_chain");
+        let mut errors = Vec::new();
+
+        mkdir(&["-p".to_string(), temp.arg("a/b/c")], &mut errors).unwrap();
+
+        assert!(temp.path().join("a/b/c").is_dir());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn p_says_nothing_about_a_directory_that_already_exists() {
+        let temp = TempDir::new("mkdir_p_existing");
+        fs::create_dir(temp.path().join("taken")).unwrap();
+        let path = temp.arg("taken/deeper");
+        let mut errors = Vec::new();
+
+        mkdir(&["-p".to_string(), path], &mut errors).unwrap();
+
+        assert!(temp.path().join("taken/deeper").is_dir());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn p_is_silent_about_the_existing_root_and_dot() {
+        let _temp = TempDir::new("mkdir_p_root");
+        let mut errors = Vec::new();
+
+        mkdir(
+            &["-p".to_string(), "/".to_string(), ".".to_string()],
+            &mut errors,
+        )
+        .unwrap();
+
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn p_reports_a_regular_file_blocking_the_path() {
+        let temp = TempDir::new("mkdir_p_blocked");
+        let path = temp.arg("blocked");
+        fs::write(&path, b"not a directory").unwrap();
+        let mut errors = Vec::new();
+
+        mkdir(&["-p".to_string(), path.clone()], &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            format!("mkdir: cannot create directory '{path}': File exists\n")
         );
     }
 }

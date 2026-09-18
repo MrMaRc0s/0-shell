@@ -1,6 +1,7 @@
 mod commands;
 mod parser;
 mod shell;
+mod signal;
 mod terminal;
 
 #[cfg(test)]

@@ -9,11 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::time::{Zone, stamp};
 use super::users::Names;
 use crate::commands::report;
+use crate::signal;
 
-/// One thing to list: the name to print, and where to find it.
+/// One thing to list: the name to print, where to find it, and its color.
 pub struct Item {
     pub display: Vec<u8>,
     pub path: PathBuf,
+    pub style: Option<&'static [u8]>,
 }
 
 /// The size column holds a byte count, or a device's two numbers.
@@ -32,6 +34,7 @@ struct Row {
     time: String,
     name: Vec<u8>,
     target: Option<Vec<u8>>,
+    style: Option<&'static [u8]>,
 }
 
 /// Writes the long listing, with the `total` line when this is a directory.
@@ -43,6 +46,7 @@ pub fn write<W, E>(
     items: &[Item],
     directory: bool,
     classify: bool,
+    colored: bool,
     output: &mut W,
     errors: &mut E,
 ) -> io::Result<()>
@@ -61,6 +65,12 @@ where
     let mut blocks = 0;
 
     for item in items {
+        // A Ctrl+C cuts the listing at the row it is building rather than
+        // after stat'ing every last entry.
+        if signal::is_pending() {
+            break;
+        }
+
         // Always the link itself, never its target: `-l` shows what the entry
         // is, and a symlink's own size, time, and mode are what belong here.
         let metadata = match item.path.symlink_metadata() {
@@ -79,6 +89,11 @@ where
             name.extend_from_slice(super::indicator(&metadata, true).as_bytes());
         }
 
+        // The color is looked up from the same metadata, so a link reads as a
+        // link even though the listing followed it to describe what the entry
+        // itself is made up of.
+        let style = item.style.or_else(|| super::style_of(&metadata, colored));
+
         rows.push(Row {
             mode: mode_string(&metadata),
             links: metadata.nlink().to_string(),
@@ -88,6 +103,7 @@ where
             time: stamp(metadata.mtime(), now, &zone),
             name,
             target: read_target(&metadata, &item.path),
+            style,
         });
     }
 
@@ -98,6 +114,9 @@ where
 
     let widths = Widths::of(&rows);
     for row in &rows {
+        if signal::is_pending() {
+            break;
+        }
         write_row(row, &widths, output)?;
     }
 
@@ -182,7 +201,14 @@ where
     }
 
     write!(output, " {} ", row.time)?;
+
+    if let Some(color) = row.style {
+        output.write_all(color)?;
+    }
     output.write_all(&row.name)?;
+    if row.style.is_some() {
+        output.write_all(super::RESET)?;
+    }
 
     if let Some(target) = &row.target {
         output.write_all(b" -> ")?;
@@ -195,10 +221,20 @@ where
 /// `drwxr-xr-x`: the type, then three groups of three permission bits.
 fn mode_string(metadata: &std::fs::Metadata) -> String {
     let file_type = metadata.file_type();
+
+    // GNU `ls` prints a symlink as `lrwxrwxrwx` whatever its stored
+    // permissions say. Linux's kernel always reports 0777 for a link, so the
+    // two agree there by accident; an APFS symlink keeps its creation mode
+    // (0755 behind a normal umask), and printing that would make this shell's
+    // `ls -l` read differently from GNU's on systems that store real symlink
+    // modes. A link is therefore rendered fully open, as the tool being
+    // matched does.
+    if file_type.is_symlink() {
+        return "lrwxrwxrwx".to_string();
+    }
+
     let kind = if file_type.is_dir() {
         'd'
-    } else if file_type.is_symlink() {
-        'l'
     } else if file_type.is_char_device() {
         'c'
     } else if file_type.is_block_device() {

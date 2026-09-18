@@ -13,41 +13,106 @@
 //! project keeps resolving everything itself, the way `ls -l` already parses
 //! `/etc/passwd` and computes dates by hand.
 //!
+//! The system call numbers, ioctl requests, and `struct termios` layout are
+//! different on Linux and macOS, and the constants below are taken from each
+//! kernel's own headers. They are compiled in only for the systems and
+//! architectures they belong to, because a number meant for one kernel is
+//! garbage to the other: issuing Linux's ioctl numbers on macOS would raise a
+//! bad system call instead of an error. On any other system the editor is
+//! unavailable and the shell falls back to plain whole-line reading. Every
+//! required behaviour is unchanged on the fallback path; only the bonus
+//! features are absent.
+//!
 //! Nothing here spawns a process. `stty` would be the easy way to set these
 //! bits and is exactly what the subject forbids.
 
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 
-/// `TCGETS`, "read the terminal settings" (`asm-generic/ioctls.h`).
-const TCGETS: usize = 0x5401;
-/// `TCSETS`, "write the terminal settings, immediately".
-const TCSETS: usize = 0x5402;
+/// The ioctl that reads the terminal settings.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TCGETS: usize = 0x5401; // `asm-generic/ioctls.h`
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TCGETS: usize = 0x4048_7413; // `TIOCGETA`, `sys/ttycom.h`
+
+/// The ioctl that writes the terminal settings, immediately.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TCSETS: usize = 0x5402; // `asm-generic/ioctls.h`
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TCSETS: usize = 0x8048_7414; // `TIOCSETA`, `sys/ttycom.h`
+
+/// `SYS_ioctl`, which differs per system and architecture.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SYS_IOCTL: usize = 16;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const SYS_IOCTL: usize = 29;
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const SYS_IOCTL: usize = 54; // `sys/syscall.h`, the same number on both
 
 /// Signal generation: Ctrl+C raises `SIGINT`, Ctrl+Z raises `SIGTSTP`.
+#[cfg(target_os = "linux")]
 const ISIG: u32 = 0o000001;
+#[cfg(target_os = "macos")]
+const ISIG: u64 = 0x0000_0080;
 /// Canonical mode: hold input back until a whole line is ready.
+#[cfg(target_os = "linux")]
 const ICANON: u32 = 0o000002;
+#[cfg(target_os = "macos")]
+const ICANON: u64 = 0x0000_0100;
 /// Echo input characters back to the screen.
+#[cfg(target_os = "linux")]
 const ECHO: u32 = 0o000010;
+#[cfg(target_os = "macos")]
+const ECHO: u64 = 0x0000_0008;
 /// Extended input processing, which includes Ctrl+V.
+#[cfg(target_os = "linux")]
 const IEXTEN: u32 = 0o100000;
+#[cfg(target_os = "macos")]
+const IEXTEN: u64 = 0x0000_0400;
 /// Start/stop flow control, which is Ctrl+S and Ctrl+Q.
+#[cfg(target_os = "linux")]
 const IXON: u32 = 0o002000;
+#[cfg(target_os = "macos")]
+const IXON: u64 = 0x0000_0200;
 /// Translate carriage return to newline on input.
+#[cfg(target_os = "linux")]
 const ICRNL: u32 = 0o000400;
+#[cfg(target_os = "macos")]
+const ICRNL: u64 = 0x0000_0100;
 
 /// `c_cc` index: how many bytes must arrive before `read` returns.
+#[cfg(target_os = "linux")]
 const VMIN: usize = 6;
+#[cfg(target_os = "macos")]
+const VMIN: usize = 16;
 /// `c_cc` index: how long `read` waits, in tenths of a second.
+#[cfg(target_os = "linux")]
 const VTIME: usize = 5;
+#[cfg(target_os = "macos")]
+const VTIME: usize = 17;
 
-/// The kernel's `struct termios`, as `TCGETS` fills it in.
+/// Linux's kernel `struct termios`, as `TCGETS` fills it in.
 ///
 /// This is the kernel layout from `asm-generic/termbits.h`, which is what the
 /// ioctl reads and writes. It is not glibc's `struct termios`: that one carries
 /// two extra speed fields on the end, and passing it here would have the kernel
 /// write past what it was promised.
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Termios {
@@ -59,6 +124,26 @@ struct Termios {
     control_characters: [u8; 19],
 }
 
+/// macOS's `struct termios`, as `TIOCGETA` fills it in.
+///
+/// This is the layout from `sys/termios.h`: four `unsigned long` flag fields,
+/// the twenty control characters, then the two speeds, also `unsigned long`.
+/// The encoded ioctl sizes confirm it — `TIOCGETA` names a 72-byte structure,
+/// which is exactly what this is on 64-bit systems, ispeed and ospeed aligned
+/// after the character array.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Termios {
+    input_flags: u64,
+    output_flags: u64,
+    control_flags: u64,
+    local_flags: u64,
+    control_characters: [u8; 20],
+    ispeed: u64,
+    ospeed: u64,
+}
+
 /// Issues a three-argument system call.
 ///
 /// # Safety
@@ -67,12 +152,21 @@ struct Termios {
 /// arguments and that the arguments are valid for it, pointers included. Every
 /// call in this module passes `SYS_ioctl` with a file descriptor, a request,
 /// and a pointer to a `Termios` this module owns.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn syscall3(number: usize, first: usize, second: usize, third: usize) -> isize {
     let result: isize;
 
     // The kernel takes its arguments in fixed registers and answers in one, so
     // the register names below are the calling convention rather than a choice.
+    // Both systems use the `syscall` instruction on x86_64, and on aarch64 both
+    // commit with `svc`, but the two aarch64 kernels disagree on everything
+    // else: Linux reads the number from `x8` and traps with `svc 0`, macOS
+    // reads it from `x16` and traps with `svc 0x80`. The numbers and
+    // instructions for the wrong system raise a bad system call, so the traps
+    // are selected by the operating system, not by the architecture.
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::asm!(
@@ -89,7 +183,7 @@ unsafe fn syscall3(number: usize, first: usize, second: usize, third: usize) -> 
         );
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     unsafe {
         std::arch::asm!(
             "svc 0",
@@ -101,20 +195,29 @@ unsafe fn syscall3(number: usize, first: usize, second: usize, third: usize) -> 
         );
     }
 
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    unsafe {
+        std::arch::asm!(
+            "svc 0x80",
+            in("x16") number,
+            inlateout("x0") first => result,
+            in("x1") second,
+            in("x2") third,
+            options(nostack, preserves_flags),
+        );
+    }
+
     result
 }
 
-/// `SYS_ioctl`, which differs per architecture.
-#[cfg(target_arch = "x86_64")]
-const SYS_IOCTL: usize = 16;
-#[cfg(target_arch = "aarch64")]
-const SYS_IOCTL: usize = 29;
-
 /// Turns the kernel's answer into an `io::Result`.
 ///
-/// A system call reports failure as the negated error number, so `-2` is the
-/// `ENOENT` that `io::Error` would call `No such file or directory`.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+/// A Linux system call reports failure as the negated error number, so `-2`
+/// is the `ENOENT` that `io::Error` would call `No such file or directory`.
+/// macOS answers the other way around: it returns the positive error number
+/// itself, so the same failure arrives as `2`, and `io::Error` reads it
+/// unchanged.
+#[cfg(target_os = "linux")]
 fn checked(result: isize) -> io::Result<()> {
     if (-4095..0).contains(&result) {
         return Err(io::Error::from_raw_os_error(-result as i32));
@@ -123,7 +226,23 @@ fn checked(result: isize) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
+fn checked(result: isize) -> io::Result<()> {
+    // `ioctl` answers `0` for a successful setting transition and an errno on
+    // failure. Everything `io::Error` knows how to spell lives far below 4095,
+    // which is the range Linux reserves for its negatives, so any answer in
+    // that band on macOS is a failure.
+    if (1..4095).contains(&result) {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+
+    Ok(())
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn get_settings(fd: RawFd) -> io::Result<Termios> {
     let mut settings = Termios::default();
 
@@ -143,7 +262,10 @@ fn get_settings(fd: RawFd) -> io::Result<Termios> {
     checked(result).map(|()| settings)
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
     // SAFETY: as above, except that `TCSETS` only reads the struct.
     let result = unsafe {
@@ -158,17 +280,24 @@ fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
     checked(result)
 }
 
-/// On an architecture without a syscall stub here, raw mode is unavailable.
+/// On a system or architecture without a syscall stub here, raw mode is
+/// unavailable.
 ///
 /// Reporting "not a terminal" is the same answer a pipe gives, so the shell
 /// falls back to reading whole lines and every required behaviour is unchanged.
 /// Only the three bonus features are missing.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn get_settings(_fd: RawFd) -> io::Result<Termios> {
     Err(io::Error::from_raw_os_error(25))
 }
 
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn set_settings(_fd: RawFd, _settings: &Termios) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(25))
 }
@@ -228,16 +357,16 @@ impl Drop for RawMode {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::mem::{offset_of, size_of};
 
-    use super::RawMode;
-    use crate::testing::TempDir;
+    use super::{RawMode, TCGETS, TCSETS, Termios};
 
     #[test]
     fn a_file_is_not_a_terminal_and_says_so() {
         // The answer the shell relies on to choose the plain reading path. A
         // test harness and a piped audit session both land here, so this is
         // the branch that keeps every required behaviour unchanged.
-        let temp = TempDir::new("raw_not_a_terminal");
+        let temp = crate::testing::TempDir::new("raw_not_a_terminal");
         let path = temp.arg("regular");
         let file = File::create(&path).unwrap();
 
@@ -250,5 +379,25 @@ mod tests {
 
         // ENOTTY, which the C library calls "Inappropriate ioctl for device".
         assert_eq!(error.raw_os_error(), Some(25));
+    }
+
+    #[test]
+    fn the_termios_layout_matches_the_ioctl_sizes() {
+        // The macOS ioctl request numbers carry the size of the struct they
+        // expect in their high bits, so a layout that drifts would eventually
+        // make the kernel read or write past a buffer this module sized by
+        // hand. Linux's requests are the old style and carry no size.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(size_of::<Termios>(), 72, "the encoded TIOCGETA size");
+            assert_eq!((TCGETS >> 16) & 0x3fff, size_of::<Termios>());
+            assert_eq!((TCSETS >> 16) & 0x3fff, size_of::<Termios>());
+            assert_eq!(offset_of!(Termios, control_characters), 32);
+            assert_eq!(offset_of!(Termios, ispeed), 56);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(size_of::<Termios>(), 36, "asm-generic termios");
+        }
     }
 }

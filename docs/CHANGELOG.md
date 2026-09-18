@@ -3,6 +3,41 @@
 Actions performed on the 0-shell project, newest first.
 Format: `Task # - Action - Quick Summary`
 
+## 2026-09-18
+
+### Bonus - redirection, colours, and raw mode on macOS
+
+- **Bonus - Implemented redirection.**
+  `>` writes a command's output to a file, `>>` appends, `<` feeds a file to a command's
+  input. The parser (`src/parser.rs`) now splits a line into its command and its
+  redirections, recognising the operators only outside quotes; the shell
+  (`src/shell.rs`) opens them left to right, lets the last one to a stream win, and stops
+  only the command it belongs to when one cannot be opened (`0-shell: cannot create 'x':
+  Permission denied`). GNU's edge rules are honoured: `> file` alone creates the file, and
+  a destinationless `>` is `syntax error near unexpected token 'newline'`. `cat` takes the
+  redirected stream as standard input and labels its read errors `(standard input)`, so a
+  script can feed it the way `cat script` would. 34 new tests cover the parser, the shell,
+  and `cat`.
+
+- **Bonus - Added colours to `ls` directories and kind marks, on a terminal only.**
+  Colours follow GNU's `--color=auto`: the styles for directories, executables, symlinks,
+  FIFOs, sockets and devices are the same constants GNU's default `LS_COLORS` uses, and
+  they are emitted only when the output is a real terminal. Every piped comparison and the
+  audit transcript stay byte for byte what they were, which is the promise this project
+  makes everywhere. Errors were deliberately left uncoloured, because the host tools do not
+  colour them and the comparison is against the host.
+
+- **Bonus - Ported raw mode to macOS, so the editor works on this machine.**
+  The editor's raw mode used the Linux-only `x8`/`svc 0` syscall convention, so on this
+  Mac's arm64 terminal the shell could never enter raw mode and completion, history and
+  editing were silently absent. Learning the real kernel conventions fixed it: macOS arm64
+  reads the number from `x16` and commits with `svc 0x80` (not `x8`/`svc 0`), and it
+  answers errors as the positive errno rather than Linux's negated one. Both variants are
+  now compiled in, each behind its own `cfg`, and the constants (`SYS_ioctl 54`,
+  `TIOCGETA 0x40487413`, the 72-byte `termios`) were read from the system's own headers,
+  not from memory. Verified on a real pseudo-terminal: Tab completes `cd /us` to
+  `cd /usr/`, Ctrl+C abandons a line and keeps the shell, and Up recalls history.
+
 ## 2026-09-07
 
 ### Bonus - interactive shell

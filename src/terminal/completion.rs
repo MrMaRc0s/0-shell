@@ -171,9 +171,9 @@ mod tests {
     fn stops_at_what_several_commands_agree_on() {
         let (word, matches) = at_end("c");
 
-        // `cat`, `cd`, and `cp` share only the `c` already typed.
+        // `cat`, `cd`, `clear`, and `cp` share only the `c` already typed.
         assert_eq!(word, "c");
-        assert_eq!(matches, vec!["cat ", "cd ", "cp "]);
+        assert_eq!(matches, vec!["cat ", "cd ", "clear ", "cp "]);
     }
 
     #[test]
