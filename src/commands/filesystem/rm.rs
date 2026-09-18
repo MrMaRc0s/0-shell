@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::options::{self, Invalid};
 use crate::commands::report;
+use crate::signal;
 
 /// Removes each named path.
 ///
@@ -38,6 +39,12 @@ where
     }
 
     for operand in &parsed.operands {
+        // A Ctrl+C stops the removal at the next operand, so the paths that
+        // come after it stay on disk.
+        if signal::is_pending() {
+            break;
+        }
+
         remove("rm", Path::new(operand), recursive, force, errors)?;
     }
 
@@ -113,6 +120,13 @@ where
 
     let mut emptied = true;
     for entry in entries {
+        // A Ctrl+C stops the walk. The directory is left alone rather than
+        // removed half-empty, and the interrupt is reported as nothing more
+        // than the new prompt it brings.
+        if signal::is_pending() {
+            return Ok(false);
+        }
+
         match entry {
             Ok(entry) => emptied &= remove(command, &entry.path(), true, force, errors)?,
             Err(error) => {

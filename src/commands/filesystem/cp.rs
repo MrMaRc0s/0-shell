@@ -5,6 +5,7 @@ use std::path::Path;
 use super::options::{self, Invalid};
 use super::transfer::{self, CP, Command};
 use crate::commands::report;
+use crate::signal;
 
 /// Copies each source operand to the destination.
 ///
@@ -42,6 +43,12 @@ where
     }
 
     for source in sources {
+        // One Ctrl+C answers for every remaining source: the rest of the tree
+        // is not started once the interrupt has arrived.
+        if signal::is_pending() {
+            break;
+        }
+
         let source = Path::new(source);
         let Some(target) = transfer::target_for(CP, source, destination, into_directory, errors)?
         else {
@@ -162,6 +169,12 @@ where
     };
 
     if let Err(error) = io::copy(&mut reader, &mut writer) {
+        // The handler does not restart system calls, so an interrupted read
+        // wakes as `EINTR`. A Ctrl+C is a silent stop, not a copy failure:
+        // whatever reached the target stays there, and no error is invented.
+        if signal::is_pending() {
+            return Ok(false);
+        }
         let subject = format!(
             "cannot {} {} to {}",
             command.verb,
@@ -280,9 +293,15 @@ where
 
     // Every entry is attempted even after one fails, so a single unreadable
     // file does not strand the rest of the tree. `mv` needs the running answer:
-    // a partial copy must not have its source removed.
+    // a partial copy must not have its source removed. A Ctrl+C stops the walk
+    // right there and answers incomplete, which is exactly what `mv` needs to
+    // hear before it deletes its source.
     let mut complete = true;
     for entry in entries {
+        if signal::is_pending() {
+            return Ok(false);
+        }
+
         match entry {
             Ok(entry) => {
                 let target = target.join(entry.file_name());

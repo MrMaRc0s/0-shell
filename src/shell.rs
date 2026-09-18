@@ -4,6 +4,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use crate::commands::report;
 use crate::commands::{CommandAction, dispatch};
 use crate::parser::{Direction, ParsedCommand, parse};
+use crate::signal;
 use crate::terminal::{Line, LineSource, PipedLines, Terminal};
 
 /// What the shell shows when it wants a command.
@@ -50,6 +51,16 @@ impl<W: Write> Write for LastByte<W> {
 }
 
 pub fn run() -> io::Result<()> {
+    // A Ctrl+C while a command runs arrives as a signal, not as the byte the
+    // prompt's raw mode turns it into. The handler installed here records it
+    // instead of letting it end the process, and the commands stop early when
+    // they see it. Failure to install keeps the old behaviour: an interrupt
+    // simply ends the shell.
+    match signal::install() {
+        Ok(()) => {}
+        Err(error) => eprintln!("0-shell: signal handler failed to install: {error}"),
+    }
+
     let mut errors = io::stderr().lock();
 
     // A person gets the line editor; anything else gets plain line reading.
@@ -106,46 +117,65 @@ where
             Line::Interrupted => {}
             // A piped line that could not be decoded; keep reading.
             Line::Invalid => writeln!(errors, "0-shell: line is not valid UTF-8")?,
-            Line::Entered(line) => match parse(&line) {
-                Ok(Some(command)) => {
-                    // The output and input files are opened before the command
-                    // runs, because a redirection that cannot be opened has to
-                    // stop the command rather than run it against nothing.
-                    let (output_file, input_file) = match open_redirections(&command) {
-                        Ok(redirects) => redirects,
-                        Err(redirect) => {
-                            writeln!(errors, "0-shell: {}", redirect.message())?;
+            Line::Entered(line) => {
+                // A Ctrl+C from the previous command is stale before this one
+                // starts, and must not be allowed to stop it. The flag is
+                // cleared once here rather than per stream, and whatever the
+                // command does with it is settled after dispatch.
+                signal::reset();
+
+                match parse(&line) {
+                    Ok(Some(command)) => {
+                        // The output and input files are opened before the
+                        // command runs, because a redirection that cannot be
+                        // opened has to stop the command rather than run it
+                        // against nothing.
+                        let (output_file, input_file) = match open_redirections(&command) {
+                            Ok(redirects) => redirects,
+                            Err(redirect) => {
+                                writeln!(errors, "0-shell: {}", redirect.message())?;
+                                continue;
+                            }
+                        };
+
+                        // A redirection with no command at all (`> file`) still
+                        // performs the redirection, as POSIX requires: the file
+                        // was opened above and is now dropped. There is nothing
+                        // to run.
+                        if command.name.is_empty() {
                             continue;
                         }
-                    };
 
-                    // A redirection with no command at all (`> file`) still
-                    // performs the redirection, as POSIX requires: the file was
-                    // opened above and is now dropped. There is nothing to run.
-                    if command.name.is_empty() {
-                        continue;
+                        // The colour decision belongs to this command's stream:
+                        // a `> file` redirect sends it to a file, and files
+                        // never get colors, whatever the terminal behind the
+                        // shell is.
+                        let colored = colored && output_file.is_none();
+
+                        let mut input = input_file;
+                        let input = input.as_mut().map(|file| file as &mut dyn Read);
+
+                        let action = match output_file {
+                            Some(mut file) => {
+                                dispatch(&command, input, &mut file, errors, colored)?
+                            }
+                            None => dispatch(&command, input, output, errors, colored)?,
+                        };
+
+                        // A Ctrl+C that reached a command's own loops is left
+                        // standing here so it is not carried into the next
+                        // line. Commands read the flag without consuming it, so
+                        // this is the one place the signal is put to rest.
+                        signal::take();
+
+                        if action == CommandAction::Exit {
+                            return Ok(());
+                        }
                     }
-
-                    // The colour decision belongs to this command's stream: a
-                    // `> file` redirect sends it to a file, and files never
-                    // get colors, whatever the terminal behind the shell is.
-                    let colored = colored && output_file.is_none();
-
-                    let mut input = input_file;
-                    let input = input.as_mut().map(|file| file as &mut dyn Read);
-
-                    let action = match output_file {
-                        Some(mut file) => dispatch(&command, input, &mut file, errors, colored)?,
-                        None => dispatch(&command, input, output, errors, colored)?,
-                    };
-
-                    if action == CommandAction::Exit {
-                        return Ok(());
-                    }
+                    Ok(None) => {}
+                    Err(error) => writeln!(errors, "0-shell: {error}")?,
                 }
-                Ok(None) => {}
-                Err(error) => writeln!(errors, "0-shell: {error}")?,
-            },
+            }
         }
     }
 }

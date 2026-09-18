@@ -16,7 +16,7 @@ mod history;
 mod keys;
 mod raw;
 
-use std::io::{self, BufRead, IsTerminal, Stdin, Write};
+use std::io::{self, BufRead, ErrorKind, IsTerminal, Stdin, Write};
 
 use editor::Editor;
 use raw::RawMode;
@@ -78,9 +78,22 @@ where
         // read_until stops at the byte rather than decoding it, so a line
         // that is not valid UTF-8 is reported instead of ending the shell.
         let mut bytes = Vec::new();
-        if self.input.read_until(b'\n', &mut bytes)? == 0 {
-            return Ok(Line::EndOfInput);
-        }
+        let bytes = loop {
+            match self.input.read_until(b'\n', &mut bytes) {
+                Ok(0) => return Ok(Line::EndOfInput),
+                Ok(_) => break bytes,
+                // A Ctrl+C with the terminal in its ordinary settings raises
+                // SIGINT, which wakes the blocked read. The handler has already
+                // recorded it; abandon the line and let the shell ask again.
+                Err(error) if error.kind() == ErrorKind::Interrupted => {
+                    if crate::signal::take() {
+                        return Ok(Line::Interrupted);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         match String::from_utf8(bytes) {
             Ok(line) => Ok(Line::Entered(line)),

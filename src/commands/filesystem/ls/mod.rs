@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::options::{self, Invalid};
 use crate::commands::report;
+use crate::signal;
 use long::Item;
 
 /// The escape sequence that ends a colored name. GNU coreutils uses `\e[0m`.
@@ -153,6 +154,9 @@ where
             long::write(&items, false, classify, colored, output, errors)?;
         } else {
             for (file, indicator, style) in files {
+                if signal::is_pending() {
+                    break;
+                }
                 write_line(file.as_bytes(), indicator, style, output)?;
             }
         }
@@ -160,6 +164,12 @@ where
     }
 
     for directory in directories {
+        // A Ctrl+C stops the listing here, so the remaining directories keep
+        // their names and produce no empty blocks.
+        if signal::is_pending() {
+            break;
+        }
+
         let path = Path::new(directory);
         let names = match read_names(path, all) {
             Ok(names) => names,
@@ -193,6 +203,10 @@ where
             long::write(&items, true, classify, colored, output, errors)?;
         } else {
             for name in names {
+                if signal::is_pending() {
+                    break;
+                }
+
                 let path = path.join(&name);
                 let metadata = path.symlink_metadata().ok();
                 let indicator = metadata
@@ -225,7 +239,17 @@ fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
     }
 
     for entry in fs::read_dir(directory)? {
-        let name = entry?.file_name();
+        // A listing interrupted mid-read keeps the names collected so far
+        // rather than reporting the `EINTR` that woke the directory read.
+        if signal::is_pending() {
+            break;
+        }
+
+        let name = match entry {
+            Ok(entry) => entry.file_name(),
+            Err(_error) if signal::is_pending() => break,
+            Err(error) => return Err(error),
+        };
         if !all && name.as_bytes().first() == Some(&b'.') {
             continue;
         }

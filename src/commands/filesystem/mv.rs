@@ -6,6 +6,7 @@ use super::options::{self, Invalid};
 use super::transfer::{self, MV};
 use super::{cp, rm};
 use crate::commands::report;
+use crate::signal;
 
 /// Moves or renames each source operand.
 ///
@@ -51,6 +52,13 @@ where
     }
 
     for source in sources {
+        // A Ctrl+C stops the move at the next operand, so the sources after it
+        // stay where they are. A cross-filesystem fallback already interrupted
+        // keeps its own source, since its copy half answered incomplete.
+        if signal::is_pending() {
+            break;
+        }
+
         let source = Path::new(source);
         let Some(target) = transfer::target_for(MV, source, destination, into_directory, errors)?
         else {

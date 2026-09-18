@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 
 use crate::commands::report;
+use crate::signal;
 
 /// The size of the block moved between the file and the output at a time.
 ///
@@ -57,6 +58,12 @@ where
     let mut block = vec![0u8; BLOCK_SIZE];
 
     for path in args {
+        // A Ctrl+C answers for the whole command, not just the file being read:
+        // once it arrives, the files that would follow are not opened either.
+        if signal::is_pending() {
+            break;
+        }
+
         if path == "-"
             && let Some(reader) = input.as_deref_mut()
         {
@@ -121,14 +128,47 @@ where
     W: Write,
 {
     loop {
+        // The one loop that streams the most, so the one Ctrl+C must be able to
+        // stop mid-block. The flag is read without being consumed, so the rest
+        // of `cat` — and then the shell — still learn about the interrupt.
+        if signal::is_pending() {
+            return Ok(());
+        }
+
         let read = match source.read(block) {
             Ok(0) => return Ok(()),
             Ok(read) => read,
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            // The handler does not restart system calls, so a blocked read
+            // wakes as `EINTR`. That is the interrupt asking to get out: stop
+            // if it is recorded, otherwise it was noise and the read goes on.
+            Err(error) if error.kind() == ErrorKind::Interrupted => {
+                if signal::is_pending() {
+                    return Ok(());
+                }
+                continue;
+            }
             Err(error) => return Err(Failure::Source(error)),
         };
 
-        output.write_all(&block[..read]).map_err(Failure::Output)?;
+        let mut written = 0;
+        while written < read {
+            match output.write(&block[written..read]) {
+                Ok(progress) => written += progress,
+                // `write_all` would swallow this error and keep retrying, and
+                // a `cat` blocked writing to a busy terminal would never
+                // return to the loop-top check above. The interrupted write is
+                // therefore answered here instead.
+                Err(error) if error.kind() == ErrorKind::Interrupted => {
+                    if signal::is_pending() {
+                        return Ok(());
+                    }
+                }
+                Err(error) => return Err(Failure::Output(error)),
+            }
+            if signal::is_pending() {
+                return Ok(());
+            }
+        }
     }
 }
 

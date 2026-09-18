@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::time::{Zone, stamp};
 use super::users::Names;
 use crate::commands::report;
+use crate::signal;
 
 /// One thing to list: the name to print, where to find it, and its color.
 pub struct Item {
@@ -64,6 +65,12 @@ where
     let mut blocks = 0;
 
     for item in items {
+        // A Ctrl+C cuts the listing at the row it is building rather than
+        // after stat'ing every last entry.
+        if signal::is_pending() {
+            break;
+        }
+
         // Always the link itself, never its target: `-l` shows what the entry
         // is, and a symlink's own size, time, and mode are what belong here.
         let metadata = match item.path.symlink_metadata() {
@@ -107,6 +114,9 @@ where
 
     let widths = Widths::of(&rows);
     for row in &rows {
+        if signal::is_pending() {
+            break;
+        }
         write_row(row, &widths, output)?;
     }
 
