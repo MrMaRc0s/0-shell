@@ -31,12 +31,14 @@ The implementation order and two-developer work split are recorded in
 | `pwd`   | none | Rejects any argument. |
 | `cd`    | none | One operand, or none for `$HOME`. |
 | `exit`  | none | Rejects any argument. |
+| `clear` | none | Clears the screen and its scrollback (past commands) and homes the cursor, so the shell is left alone at the top. Arguments are ignored. |
 | `mkdir` | none | One or more directories. No `-p`: each parent has to exist already. |
 | `cat`   | none | One or more files, streamed as raw bytes. |
 | `cp`    | `-r`, `-R` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. |
 | `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
 | `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
 | `ls`    | `-l`, `-a`, `-F` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. |
+| `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 
 Options may appear in any position, `--` ends option parsing, and an unknown
 option is refused (`ls: invalid option -- 'x'`) rather than taken for a
@@ -68,6 +70,12 @@ At a terminal the shell reads a line itself rather than letting the kernel do
 it, which is what makes the three bonus features below possible. Piped or
 redirected input takes the plain path instead, unchanged and unaware any of this
 exists, so scripts and the audit transcript behave exactly as they always did.
+
+The editor talks to the kernel through the Linux `TCSETS`/`TCGETS` ioctls, so
+its raw-mode detection succeeds only on a Linux terminal. Elsewhere — piped
+input, or a non-Linux terminal such as macOS — the shell detects it cannot
+enter raw mode and takes the plain reading path, so every required behaviour is
+still present and only the three bonus features are absent.
 
 | Key | Does |
 |---|---|

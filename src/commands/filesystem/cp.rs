@@ -191,6 +191,27 @@ fn copy_symlink<E>(
 where
     E: Write,
 {
+    // Recreating the link means removing the target first, so a link that
+    // resolves to its own destination would delete the very file it is about
+    // to name again: `cp -r link file1` with `link -> file1` leaves `file1` a
+    // self-loop and loses the contents. The followed source is measured
+    // against the target's own entry, as `copy_file` does for plain files;
+    // copying a link onto the link itself is a harmless recreation and passes,
+    // because the target's own entry is then the link.
+    if source.metadata().is_ok_and(|source| {
+        target
+            .symlink_metadata()
+            .is_ok_and(|target| transfer::is_same_file(&source, &target))
+    }) {
+        let text = format!(
+            "{} and {} are the same file",
+            report::quoted(source),
+            report::quoted(target)
+        );
+        report::message(command.name, &text, errors)?;
+        return Ok(false);
+    }
+
     let link = match fs::read_link(source) {
         Ok(link) => link,
         Err(error) => {
@@ -518,6 +539,54 @@ mod tests {
             String::from_utf8(errors).unwrap(),
             format!("cp: '{source}' and '{same}' are the same file\n")
         );
+    }
+
+    #[test]
+    fn refuses_a_recursive_copy_of_a_link_onto_its_own_target() {
+        // `link -> file1` copied with `-r` onto `file1` recreates the link by
+        // deleting the target first, which would leave `file1` a self-loop and
+        // lose its contents.
+        let temp = TempDir::new("cp_r_symlink_target");
+        let target = write(&temp, "file1", b"precious\n");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("file1", &link).unwrap();
+        let mut errors = Vec::new();
+
+        cp(
+            &["-r".to_string(), link.clone(), target.clone()],
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            format!("cp: '{link}' and '{target}' are the same file\n")
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"precious\n",
+            "target destroyed"
+        );
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "source lost"
+        );
+    }
+
+    #[test]
+    fn copying_a_link_onto_itself_is_a_harmless_recreation() {
+        // `cp -r link link` removes and recreates the very same entry, so it
+        // must not be refused as a same-file copy.
+        let temp = TempDir::new("cp_r_link_self");
+        let file = write(&temp, "file1", b"still here\n");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("file1", &link).unwrap();
+        let mut errors = Vec::new();
+
+        cp(&["-r".to_string(), link.clone(), link], &mut errors).unwrap();
+
+        assert!(errors.is_empty());
+        assert_eq!(fs::read(&file).unwrap(), b"still here\n");
     }
 
     #[test]

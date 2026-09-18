@@ -41,6 +41,8 @@ where
             // again. This is the whole of the bonus, and it is this short only
             // because raw mode stopped the kernel turning it into a signal.
             Line::Interrupted => {}
+            // A piped line that could not be decoded; keep reading.
+            Line::Invalid => writeln!(errors, "0-shell: line is not valid UTF-8")?,
             Line::Entered(line) => match parse(&line) {
                 Ok(Some(command)) => {
                     if dispatch(&command, output, errors)? == CommandAction::Exit {
@@ -122,6 +124,20 @@ mod tests {
 
         assert_eq!(output, "$ before\n$ ");
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_utf8_line_is_handled_and_later_lines_still_run() {
+        let mut input = Cursor::new(vec![
+            0xff, b'\n', b'e', b'c', b'h', b'o', b' ', b'h', b'i', b'\n',
+        ]);
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        run_with_io(&mut input, &mut output, &mut errors).unwrap();
+
+        assert_eq!(output, b"$ $ hi\n$ \n");
+        assert_eq!(errors, b"0-shell: line is not valid UTF-8\n");
     }
 
     #[test]

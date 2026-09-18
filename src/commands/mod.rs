@@ -12,8 +12,8 @@ use crate::parser::ParsedCommand;
 /// offered here that `dispatch` does not know would complete to
 /// `Command 'name' not found`. Deliberately not drawn from `$PATH`, since this
 /// shell runs no external program and would be offering names it cannot run.
-pub const COMMAND_NAMES: [&str; 10] = [
-    "cat", "cd", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm",
+pub const COMMAND_NAMES: [&str; 12] = [
+    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,10 @@ where
             session::cd(&command.args, errors)?;
             Ok(CommandAction::Continue)
         }
+        "clear" => {
+            session::clear(&command.args, output)?;
+            Ok(CommandAction::Continue)
+        }
         "exit" => session::exit(&command.args, errors),
         "mkdir" => {
             filesystem::mkdir(&command.args, errors)?;
@@ -67,6 +71,10 @@ where
         }
         "ls" => {
             filesystem::ls(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "touch" => {
+            filesystem::touch(&command.args, errors)?;
             Ok(CommandAction::Continue)
         }
         _ => {
@@ -174,8 +182,36 @@ mod tests {
         let (output, _, _) = run(&["pwd"]);
         assert!(output.starts_with('/'), "pwd: {output}");
 
+        let (output, errors, action) = run(&["clear"]);
+        assert_eq!(output, "\x1b[H\x1b[2J\x1b[3J");
+        assert!(errors.is_empty());
+        assert_eq!(action, CommandAction::Continue);
+
         let (_, _, action) = run(&["exit"]);
         assert_eq!(action, CommandAction::Exit);
+    }
+
+    #[test]
+    fn the_touch_arm_creates_and_reports_through_the_dispatcher() {
+        let temp = TempDir::new("dispatch_touch");
+        let path = temp.arg("new.txt");
+
+        let (output, errors, action) = run(&["touch", &path]);
+
+        assert!(output.is_empty(), "touch: {output}");
+        assert!(errors.is_empty(), "touch: {errors}");
+        assert!(fs::metadata(&path).unwrap().is_file());
+        assert_eq!(action, CommandAction::Continue);
+
+        // A failure has to come back through the same arm rather than reaching
+        // the unknown-command path.
+        let (_, errors, action) = run(&["touch", &temp.arg("missing/doc.txt")]);
+
+        assert!(
+            errors.starts_with("touch: cannot touch "),
+            "touch: {errors}"
+        );
+        assert_eq!(action, CommandAction::Continue);
     }
 
     #[test]

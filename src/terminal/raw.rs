@@ -13,6 +13,14 @@
 //! project keeps resolving everything itself, the way `ls -l` already parses
 //! `/etc/passwd` and computes dates by hand.
 //!
+//! The system call numbers, ioctl requests, and `struct termios` layout below
+//! belong to the Linux kernel's `asm-generic` headers, so they are compiled in
+//! only for Linux. On any other system the editor is unavailable and the shell
+//! falls back to plain whole-line reading: the syscall numbers would not exist
+//! there (`bad system call`), and guessing would turn a missing editor into a
+//! crash. Every required behaviour is unchanged on the fallback path; only the
+//! three bonus features are absent.
+//!
 //! Nothing here spawns a process. `stty` would be the easy way to set these
 //! bits and is exactly what the subject forbids.
 
@@ -20,8 +28,16 @@ use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 
 /// `TCGETS`, "read the terminal settings" (`asm-generic/ioctls.h`).
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 const TCGETS: usize = 0x5401;
 /// `TCSETS`, "write the terminal settings, immediately".
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 const TCSETS: usize = 0x5402;
 
 /// Signal generation: Ctrl+C raises `SIGINT`, Ctrl+Z raises `SIGTSTP`.
@@ -67,7 +83,10 @@ struct Termios {
 /// arguments and that the arguments are valid for it, pointers included. Every
 /// call in this module passes `SYS_ioctl` with a file descriptor, a request,
 /// and a pointer to a `Termios` this module owns.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe fn syscall3(number: usize, first: usize, second: usize, third: usize) -> isize {
     let result: isize;
 
@@ -105,16 +124,19 @@ unsafe fn syscall3(number: usize, first: usize, second: usize, third: usize) -> 
 }
 
 /// `SYS_ioctl`, which differs per architecture.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SYS_IOCTL: usize = 16;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const SYS_IOCTL: usize = 29;
 
 /// Turns the kernel's answer into an `io::Result`.
 ///
 /// A system call reports failure as the negated error number, so `-2` is the
 /// `ENOENT` that `io::Error` would call `No such file or directory`.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn checked(result: isize) -> io::Result<()> {
     if (-4095..0).contains(&result) {
         return Err(io::Error::from_raw_os_error(-result as i32));
@@ -123,7 +145,10 @@ fn checked(result: isize) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn get_settings(fd: RawFd) -> io::Result<Termios> {
     let mut settings = Termios::default();
 
@@ -143,7 +168,10 @@ fn get_settings(fd: RawFd) -> io::Result<Termios> {
     checked(result).map(|()| settings)
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
     // SAFETY: as above, except that `TCSETS` only reads the struct.
     let result = unsafe {
@@ -158,17 +186,26 @@ fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
     checked(result)
 }
 
-/// On an architecture without a syscall stub here, raw mode is unavailable.
+/// On a system or architecture without a syscall stub here, raw mode is
+/// unavailable.
 ///
 /// Reporting "not a terminal" is the same answer a pipe gives, so the shell
 /// falls back to reading whole lines and every required behaviour is unchanged.
-/// Only the three bonus features are missing.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+/// Only the three bonus features are missing. A non-Linux Unix such as macOS
+/// lands here deliberately: the ioctl numbers in this module are Linux's, and
+/// issuing them elsewhere would raise a bad system call instead of an error.
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn get_settings(_fd: RawFd) -> io::Result<Termios> {
     Err(io::Error::from_raw_os_error(25))
 }
 
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn set_settings(_fd: RawFd, _settings: &Termios) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(25))
 }

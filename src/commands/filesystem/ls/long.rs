@@ -195,10 +195,20 @@ where
 /// `drwxr-xr-x`: the type, then three groups of three permission bits.
 fn mode_string(metadata: &std::fs::Metadata) -> String {
     let file_type = metadata.file_type();
+
+    // GNU `ls` prints a symlink as `lrwxrwxrwx` whatever its stored
+    // permissions say. Linux's kernel always reports 0777 for a link, so the
+    // two agree there by accident; an APFS symlink keeps its creation mode
+    // (0755 behind a normal umask), and printing that would make this shell's
+    // `ls -l` read differently from GNU's on systems that store real symlink
+    // modes. A link is therefore rendered fully open, as the tool being
+    // matched does.
+    if file_type.is_symlink() {
+        return "lrwxrwxrwx".to_string();
+    }
+
     let kind = if file_type.is_dir() {
         'd'
-    } else if file_type.is_symlink() {
-        'l'
     } else if file_type.is_char_device() {
         'c'
     } else if file_type.is_block_device() {

@@ -1,4 +1,4 @@
-//! Filesystem commands: `mkdir`, `cat`, `cp`, `mv`, `rm`, and `ls`.
+//! Filesystem commands: `mkdir`, `cat`, `cp`, `mv`, `rm`, `ls`, and `touch`.
 //!
 //! Each command lives in its own module and is re-exported here so the
 //! dispatcher in `crate::commands` sees one flat namespace.
@@ -34,6 +34,7 @@
 //! | `cp`    | `cp: cannot create directory '<dst>': <reason>` (target side, `-r`) |
 //! | `mv`    | `mv: cannot stat '<src>': <reason>` (source side) |
 //! | `mv`    | `mv: cannot move '<src>' to '<dst>': <reason>` (target side) |
+//! | `touch` | `touch: cannot touch '<path>': <reason>` |
 //!
 //! Note that `cat` is the odd one out: it quotes nothing and uses the bare
 //! `<command>: <path>: <reason>` form. The others wrap the path in plain
@@ -46,6 +47,7 @@
 //! * `rm: missing operand`
 //! * `cp: missing file operand`
 //! * `mv: missing file operand`
+//! * `touch: missing file operand`
 //! * `cp: missing destination file operand after '<src>'`
 //! * `mv: missing destination file operand after '<src>'`
 //!
@@ -101,6 +103,7 @@ mod mkdir;
 mod mv;
 mod options;
 mod rm;
+mod touch;
 mod transfer;
 
 pub use cat::cat;
@@ -109,3 +112,4 @@ pub use ls::ls;
 pub use mkdir::mkdir;
 pub use mv::mv;
 pub use rm::rm;
+pub use touch::touch;

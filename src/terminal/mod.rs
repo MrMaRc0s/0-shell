@@ -29,6 +29,9 @@ pub enum Line {
     Interrupted,
     /// Input ended, by Ctrl+D at an empty prompt or by a pipe running dry.
     EndOfInput,
+    /// The line could not be decoded as UTF-8 (a piped line), the shell
+    /// reports it and keeps reading.
+    Invalid,
 }
 
 /// Somewhere the shell can ask for its next line.
@@ -64,12 +67,17 @@ where
         write!(output, "{prompt}")?;
         output.flush()?;
 
-        let mut line = String::new();
-        if self.input.read_line(&mut line)? == 0 {
+        // read_until stops at the byte rather than decoding it, so a line
+        // that is not valid UTF-8 is reported instead of ending the shell.
+        let mut bytes = Vec::new();
+        if self.input.read_until(b'\n', &mut bytes)? == 0 {
             return Ok(Line::EndOfInput);
         }
 
-        Ok(Line::Entered(line))
+        match String::from_utf8(bytes) {
+            Ok(line) => Ok(Line::Entered(line)),
+            Err(_) => Ok(Line::Invalid),
+        }
     }
 }
 

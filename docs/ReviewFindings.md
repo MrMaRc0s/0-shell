@@ -13,11 +13,11 @@
 
 ## P0 — Critical: data loss / crash (fix first)
 
-- [ ] **FIX-001 P0 CONFIRMED (B1) — `mv link file` self-loop data loss** — `src/commands/filesystem/mv.rs:74-95,109` uses `symlink_metadata()` + `is_same_file(dev,ino)` so `link -> file1` vs `file1` look different; `fs::rename(link,file1)` replaces `file1` with `file1 -> file1` (`ELOOP`, unrecoverable). Repro validated in `/tmp`. **Fix:** canonicalize / `fs::metadata` follow check before rename; if `source` resolves to `target`, abort with `mv: 'a' and 'b' are the same file`; add test `mv_symlink_to_its_target_is_refused`.
-- [ ] **FIX-002 P0 CONFIRMED (B2+A5 root) — `cp -r link file` self-loop data loss** — `src/commands/filesystem/cp.rs:184-216` `copy_symlink` has no `is_same_file` guard (vs `copy_file:133-136` has it); does `remove_file(file1)` + `symlink("file1","file1")` → self-loop. `cp -r link link` alone is harmless (same content), destructive variant is `link -> file1` onto `file1`. **Fix:** same guard as FIX-001 in `copy_symlink` (+ path-equality fast path); tests: `cp_r_symlink_onto_its_target_is_refused`, `cp_r_link_onto_self_ok`.
-- [ ] **FIX-003 P0 CONFIRMED (B3) — `ls -l` SIGABRT via `Vec::with_capacity(timecnt)` before length check** — `src/commands/filesystem/ls/time.rs:101,122`. `u32::MAX` → ~17 GB abort. Requires self-set malicious `TZ` file (severity downgraded from remote to self-DoS, still P0). **Fix:** assert `timecnt*9 <= data.len()` (and same for `typecnt/charcnt`) before allocating; cap zone file to e.g. 64 KB; test with crafted TZif header.
-- [ ] **FIX-004 P0 CONFIRMED (B4) — unbounded `fs::read` on `TZ` path** — `src/commands/filesystem/ls/time.rs:61-63,188-204` (`zone_path()` allows absolute `TZ`); `TZ=/dev/zero` OOMs, FIFO hangs, per `ls -l` via `long.rs:54`. **Fix:** `symlink_metadata` + size cap + reject non-regular files (fallback UTC); test `TZ=/dev/null`, oversized, FIFO.
-- [ ] **FIX-005 P1 CONFIRMED (A1) — invalid UTF-8 piped input kills shell** — `src/terminal/mod.rs:68` `read_line(&mut String)?` → `InvalidData`; `src/shell.rs:35,46` `?` exits process (`0-shell: stream did not contain valid UTF-8`, second line never runs — probed). **Fix:** `read_until(b'\n')` + per-line diagnostic to stderr + `continue` (or `from_utf8_lossy`); test `b'\xff\n echo hi\n'` continues.
+- [x] **FIX-001 P0 CONFIRMED (B1) — `mv link file` self-loop data loss** — `src/commands/filesystem/mv.rs:74-95,109` uses `symlink_metadata()` + `is_same_file(dev,ino)` so `link -> file1` vs `file1` look different; `fs::rename(link,file1)` replaces `file1` with `file1 -> file1` (`ELOOP`, unrecoverable). Repro validated in `/tmp`. **Fix:** canonicalize / `fs::metadata` follow check before rename; if `source` resolves to `target`, abort with `mv: 'a' and 'b' are the same file`; add test `mv_symlink_to_its_target_is_refused`. → **Done on `devcemv`:** followed-source vs target's own entry; tests `refuses_to_move_a_symlink_onto_its_own_target` + `moving_one_link_over_another_to_the_same_target_still_works`.
+- [x] **FIX-002 P0 CONFIRMED (B2+A5 root) — `cp -r link file` self-loop data loss** — `src/commands/filesystem/cp.rs:184-216` `copy_symlink` has no `is_same_file` guard (vs `copy_file:133-136` has it); does `remove_file(file1)` + `symlink("file1","file1")` → self-loop. `cp -r link link` alone is harmless (same content), destructive variant is `link -> file1` onto `file1`. **Fix:** same guard as FIX-001 in `copy_symlink` (+ path-equality fast path); tests: `cp_r_symlink_onto_its_target_is_refused`, `cp_r_link_onto_self_ok`. → **Done on `devcemv`:** guard in `copy_symlink` compares followed source against target's own entry, so `cp -r link link` still passes; tests `refuses_a_recursive_copy_of_a_link_onto_its_own_target` + `copying_a_link_onto_itself_is_a_harmless_recreation`.
+- [x] **FIX-003 P0 CONFIRMED (B3) — `ls -l` SIGABRT via `Vec::with_capacity(timecnt)` before length check** — `src/commands/filesystem/ls/time.rs:101,122`. `u32::MAX` → ~17 GB abort. Requires self-set malicious `TZ` file (severity downgraded from remote to self-DoS, still P0). **Fix:** assert `timecnt*9 <= data.len()` (and same for `typecnt/charcnt`) before allocating; cap zone file to e.g. 64 KB; test with crafted TZif header. → **Done on `devcemv`:** `counts_fit` check + 64 KiB `MAX_ZONE_FILE_SIZE`; tests `a_header_claiming_huge_counts_is_rejected_before_allocating`, `rejects_a_zone_file_above_the_size_cap`, etc.
+- [x] **FIX-004 P0 CONFIRMED (B4) — unbounded `fs::read` on `TZ` path** — `src/commands/filesystem/ls/time.rs:61-63,188-204` (`zone_path()` allows absolute `TZ`); `TZ=/dev/zero` OOMs, FIFO hangs, per `ls -l` via `long.rs:54`. **Fix:** `symlink_metadata` + size cap + reject non-regular files (fallback UTC); test `TZ=/dev/null`, oversized, FIFO. → **Done on `devcemv`:** `from_path` uses `fs::metadata` (follows symlinks), rejects non-files and files over 64 KiB.
+- [x] **FIX-005 P1 CONFIRMED (A1) — invalid UTF-8 piped input kills shell** — `src/terminal/mod.rs:68` `read_line(&mut String)?` → `InvalidData`; `src/shell.rs:35,46` `?` exits process (`0-shell: stream did not contain valid UTF-8`, second line never runs — probed). **Fix:** `read_until(b'\n')` + per-line diagnostic to stderr + `continue` (or `from_utf8_lossy`); test `b'\xff\n echo hi\n'` continues. → **Done on `devcemv`:** bytes read with `read_until(b'\n')`, new `Line::Invalid` reported as `0-shell: line is not valid UTF-8`; test `an_invalid_utf8_line_is_handled_and_later_lines_still_run`.
 
 ## P1 — Robustness / audit-risk
 
@@ -81,3 +81,32 @@ Traceability (validator CONFIRMED): covered `F1-F7,F11,F13-F17,F19,B2/history`; 
 3. `FIX-009` + `DOC-001` (docs lie about flags — auditor-visible).
 4. `TEST-001 → TEST-005` (triple flags, nav suite, purity, Ctrl+C/D, shell errors) — closes audit-Q gaps.
 5. `FIX-007, FIX-008, FIX-010 → FIX-014`, `ARCH-001 → ARCH-007`, `TEST-006 → TEST-010`, `DOC-002 → DOC-004`.
+
+---
+
+## Resolved on `devcemv` — macOS dev-machine findings (not in the Linux audit)
+
+The audit ran on Linux, where the two issues below cannot appear. `devcemv` is
+developed on macOS, where they did, and are now fixed:
+
+- **MAC-001 — `bad system call` (SIGSYS) on macOS from `raw.rs`.** The raw-mode
+  module issued Linux's `SYS_ioctl` number and `TCGETS`/`TCSETS` requests
+  (`0x5401`/`0x5402`) on every x86_64/aarch64, which do not exist on Darwin; the
+  test suite died with signal 12 and an interactive shell on a TTY would too.
+  **Fixed:** the syscall stubs, ioctl numbers, and struct are now compiled in
+  only when `target_os = "linux"`; elsewhere `get_settings`/`set_settings`
+  report `ENOTTY`, so `Terminal::new()` falls back to plain whole-line reading
+  (all required behaviour unchanged; only the editor bonus is absent, matching
+  the existing non-syscall-arch fallback). Constants `TCGETS/TCSETS` are gated
+  too. README documents the Linux-only editor.
+- **MAC-002 — `ls -l` symlink mode test failed on macOS.** The test asserted
+  GNU's `lrwxrwxrwx`, but the code printed the stored mode, and APFS keeps a
+  symlink's creation mode (`0755` behind a normal umask). Linux's kernel always
+  reports `0777`, so Linux never noticed. **Fixed in `mode_string`:**
+  symlinks are rendered `lrwxrwxrwx` on every platform, which is what GNU `ls`
+  prints; the host BSD tool's `lrwxr-xr-x` is the one now deliberately apart,
+  matching the project's GNU-targeting charter.
+
+Verification of the whole session (this branch): `cargo fmt --check`, `cargo
+clippy -- -D warnings`, and `cargo test` — 177 passing. P0 items FIX-001..005
+are checked off above.

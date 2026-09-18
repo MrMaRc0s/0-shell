@@ -79,12 +79,26 @@ where
     }
 }
 
+/// Clears the screen by writing the terminal's clear sequence.
+///
+/// This is the `clear` of a plain terminal: erase the whole display and its
+/// scrollback, then home the cursor, so the shell is left alone at the very
+/// top with history gone. Arguments are ignored, since there is nothing to
+/// configure; a later operand clears all the same.
+pub fn clear<W>(_args: &[String], output: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    output.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
+    output.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
     use std::os::unix::ffi::OsStrExt;
 
-    use super::{change_directory, echo, exit, pwd};
+    use super::{change_directory, clear, echo, exit, pwd};
     use crate::commands::CommandAction;
     use crate::testing::WorkingDirectory;
 
@@ -179,6 +193,24 @@ mod tests {
             String::from_utf8(errors).unwrap(),
             "cd: HOME not set\ncd: too many arguments\n"
         );
+    }
+
+    #[test]
+    fn clear_writes_the_screen_and_scrollback_reset_sequence() {
+        let mut output = Vec::new();
+
+        clear(&[], &mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[H\x1b[2J\x1b[3J");
+    }
+
+    #[test]
+    fn clear_ignores_arguments() {
+        let mut output = Vec::new();
+
+        clear(&["extra".to_string()], &mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[H\x1b[2J\x1b[3J");
     }
 
     #[test]

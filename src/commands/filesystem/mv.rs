@@ -94,6 +94,28 @@ where
         return report::message("mv", &text, errors);
     }
 
+    // The check above compares the link as itself, which is right for a rename
+    // onto the same entry or a hard link to it. A symlink that *resolves* to
+    // its destination is the same trap with the follow switched on: for
+    // `link -> file.txt`, `mv link file.txt` would replace the file with a
+    // link that points at itself, destroying its contents. The followed source
+    // is measured against the target's own entry, so moving one link over
+    // another that leads to the same file is still allowed.
+    if metadata.file_type().is_symlink()
+        && target.symlink_metadata().is_ok_and(|target| {
+            source
+                .metadata()
+                .is_ok_and(|source| transfer::is_same_file(&source, &target))
+        })
+    {
+        let text = format!(
+            "{} and {} are the same file",
+            report::quoted(source),
+            report::quoted(target)
+        );
+        return report::message("mv", &text, errors);
+    }
+
     // A directory cannot swallow itself. `rename` calls this `Invalid
     // argument`, which explains nothing, and the fallback below would otherwise
     // walk a tree that grows as fast as it is read.
@@ -282,6 +304,47 @@ mod tests {
         assert_eq!(fs::read_link(&target).unwrap(), PathBuf::from("file.txt"));
         assert_eq!(fs::read(&file).unwrap(), b"pointed at\n", "target followed");
         assert!(errors.is_empty(), "{errors}");
+    }
+
+    #[test]
+    fn refuses_to_move_a_symlink_onto_its_own_target() {
+        // `link -> file.txt`, then `mv link file.txt`: a rename would replace
+        // the file with a link pointing at itself and destroy its contents.
+        let temp = TempDir::new("mv_symlink_target");
+        let file = write(&temp, "file.txt", b"precious\n");
+        let link = temp.arg("link");
+        std::os::unix::fs::symlink("file.txt", &link).unwrap();
+
+        let errors = run(&args(&[&link, &file]));
+
+        assert_eq!(
+            errors,
+            format!("mv: '{link}' and '{file}' are the same file\n")
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"precious\n", "target destroyed");
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "source lost"
+        );
+    }
+
+    #[test]
+    fn moving_one_link_over_another_to_the_same_target_still_works() {
+        // A rename onto a link is a rename onto the link's own entry, not what
+        // it points at, so two links to one file move over each other freely.
+        let temp = TempDir::new("mv_link_over_link");
+        let file = write(&temp, "file.txt", b"shared\n");
+        let first = temp.arg("first");
+        let second = temp.arg("second");
+        std::os::unix::fs::symlink("file.txt", &first).unwrap();
+        std::os::unix::fs::symlink("file.txt", &second).unwrap();
+
+        let errors = run(&args(&[&first, &second]));
+
+        assert!(errors.is_empty(), "{errors}");
+        assert!(fs::symlink_metadata(&second).unwrap().is_symlink());
+        assert_eq!(fs::read_link(&second).unwrap(), PathBuf::from("file.txt"));
+        assert_eq!(fs::read(&file).unwrap(), b"shared\n");
     }
 
     #[test]

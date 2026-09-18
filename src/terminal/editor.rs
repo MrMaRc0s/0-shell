@@ -240,7 +240,10 @@ mod tests {
         assert_eq!(cursor, 1);
 
         // Listed without the trailing space each candidate carries.
-        assert_eq!(String::from_utf8(output).unwrap(), "\r\ncat  cd  cp\r\n");
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "\r\ncat  cd  clear  cp\r\n"
+        );
     }
 
     #[test]
