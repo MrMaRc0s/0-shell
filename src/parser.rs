@@ -1,4 +1,7 @@
+use std::env;
 use std::fmt;
+use std::iter::Peekable;
+use std::str::Chars;
 
 /// The way a redirection changes a stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +90,22 @@ pub fn parse(input: &str) -> Result<Option<ParsedCommand>, ParseError> {
                 word_started = true;
             }
             (Quote::Double, '"') => quote = Quote::None,
+            // `$NAME` and `${NAME}` expand to the environment variable's
+            // value, or to nothing when it is unset — outside single quotes,
+            // which is where a real shell also stops expanding them.
+            (Quote::None | Quote::Double, '$') => {
+                word_started = true;
+                match read_variable_name(&mut characters) {
+                    Some(name) => {
+                        if let Ok(value) = env::var(&name) {
+                            current.push_str(&value);
+                        }
+                    }
+                    // Nothing that could name a variable followed the `$`, so
+                    // it stands for itself: `echo $` prints a bare `$`.
+                    None => current.push('$'),
+                }
+            }
             (Quote::None, character) if character.is_whitespace() => {
                 take_word(
                     &mut words,
@@ -188,8 +207,48 @@ fn take_word(
     }
 }
 
+/// Reads the name a `$` introduces: `{NAME}` up to its closing brace (or to
+/// the end of input, if it is never closed), or a bare identifier — a letter
+/// or underscore, then letters, digits, or underscores. `None` means the `$`
+/// named nothing, because the very next character cannot start one: `$9` and
+/// `$$` are shells' own positional and process-id parameters, neither of
+/// which this shell has a value for, so both are left as literal text rather
+/// than silently expanding to nothing.
+fn read_variable_name(characters: &mut Peekable<Chars>) -> Option<String> {
+    if characters.peek() == Some(&'{') {
+        characters.next();
+        let mut name = String::new();
+        for character in characters.by_ref() {
+            if character == '}' {
+                break;
+            }
+            name.push(character);
+        }
+        return if name.is_empty() { None } else { Some(name) };
+    }
+
+    match characters.peek() {
+        Some(&character) if character.is_alphabetic() || character == '_' => {}
+        _ => return None,
+    }
+
+    let mut name = String::new();
+    while let Some(&character) = characters.peek() {
+        if character.is_alphanumeric() || character == '_' {
+            name.push(character);
+            characters.next();
+        } else {
+            break;
+        }
+    }
+
+    Some(name)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::{Direction, ParseError, ParsedCommand, Redirection, parse};
 
     fn command(name: &str, args: &[&str]) -> ParsedCommand {
@@ -322,6 +381,66 @@ mod tests {
         assert_eq!(
             parse("echo 'a>b' \"c<d\" e\\>f").unwrap(),
             Some(command("echo", &["a>b", "c<d", "e>f"]))
+        );
+    }
+
+    #[test]
+    fn a_bare_dollar_name_expands_to_the_variables_value() {
+        // SAFETY: `ZERO_SHELL_PARSER_TEST_BARE` is a name unique to this
+        // test, so no other test's read of it races with this write.
+        unsafe { env::set_var("ZERO_SHELL_PARSER_TEST_BARE", "value") };
+
+        assert_eq!(
+            parse("echo $ZERO_SHELL_PARSER_TEST_BARE end").unwrap(),
+            Some(command("echo", &["value", "end"]))
+        );
+
+        unsafe { env::remove_var("ZERO_SHELL_PARSER_TEST_BARE") };
+    }
+
+    #[test]
+    fn a_braced_name_expands_and_keeps_the_word_that_follows_it_apart() {
+        // SAFETY: see above.
+        unsafe { env::set_var("ZERO_SHELL_PARSER_TEST_BRACED", "value") };
+
+        assert_eq!(
+            parse("echo ${ZERO_SHELL_PARSER_TEST_BRACED}end").unwrap(),
+            Some(command("echo", &["valueend"]))
+        );
+
+        unsafe { env::remove_var("ZERO_SHELL_PARSER_TEST_BRACED") };
+    }
+
+    #[test]
+    fn an_unset_variable_expands_to_nothing() {
+        assert_eq!(
+            parse("echo [$ZERO_SHELL_PARSER_TEST_UNSET]").unwrap(),
+            Some(command("echo", &["[]"]))
+        );
+    }
+
+    #[test]
+    fn expansion_happens_inside_double_quotes_but_not_single_quotes() {
+        // SAFETY: see above.
+        unsafe { env::set_var("ZERO_SHELL_PARSER_TEST_QUOTED", "value") };
+
+        assert_eq!(
+            parse("echo \"$ZERO_SHELL_PARSER_TEST_QUOTED\" '$ZERO_SHELL_PARSER_TEST_QUOTED'")
+                .unwrap(),
+            Some(command(
+                "echo",
+                &["value", "$ZERO_SHELL_PARSER_TEST_QUOTED"]
+            ))
+        );
+
+        unsafe { env::remove_var("ZERO_SHELL_PARSER_TEST_QUOTED") };
+    }
+
+    #[test]
+    fn a_dollar_with_nothing_that_can_name_a_variable_is_literal() {
+        assert_eq!(
+            parse("echo a$ b$$ $9").unwrap(),
+            Some(command("echo", &["a$", "b$$", "$9"]))
         );
     }
 

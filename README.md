@@ -41,7 +41,7 @@ The implementation order and two-developer work split are recorded in
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 | `type`  | none | Says whether each name is one of this shell's own commands, the way bash's builtin does for one of its. With no operand it says nothing, which is also what bash does. |
 | `which` | none | The same question `type` answers, in the wording the standalone `which` uses. There is no `$PATH` to search and so no path to print: this shell runs no external program, and the honest answer is only ever "one of mine" or "not mine". |
-| `export` | none | Sets each `NAME=VALUE`, or a bare `NAME` to the empty string if it has no value yet, as an environment variable — the same one `cd` reads for `$HOME`. Rejects a name that is not a valid identifier. |
+| `export` | none | Sets each `NAME=VALUE`, or a bare `NAME` to the empty string if it has no value yet, as an environment variable — the same one `$NAME` expands and `cd` reads for `$HOME`. Rejects a name that is not a valid identifier. |
 | `unset`  | none | Removes each named environment variable. |
 | `help`   | none | Lists every command above with its own `--help` text, so the two can never disagree about what a command does. |
 
@@ -71,6 +71,16 @@ cannot be opened stops only its command —
 `cat` reads a redirected file as standard input, and labels a read error on it
 `cat: (standard input)`. `>>`, `>`, and `<` are recognised only outside quotes,
 so a file name can genuinely contain them.
+
+## Environment variables
+
+`$NAME` and `${NAME}` expand to the value `export` gave the variable, or to
+nothing if it was never set or has since been removed with `unset`. Expansion
+happens everywhere but inside single quotes — bare on the command line and
+inside double quotes alike — the same place `>` and `<` stop being operators.
+`$9` and `$$` are left as literal text: this shell has no positional
+parameters or process id to give them, and expanding either to nothing would
+be more surprising than leaving them alone.
 
 `rm -i` and `mv -i` read their yes-or-no answers the same way: from a file
 redirected with `<` when there is one, from the terminal itself when a person
