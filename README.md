@@ -34,7 +34,7 @@ The implementation order and two-developer work split are recorded in
 | `clear` | none | Clears the screen and its scrollback (past commands) and homes the cursor, so the shell is left alone at the top. Arguments are ignored. |
 | `mkdir` | `-p` | One or more directories. `-p` creates each operand's missing parents in one go and passes over a directory that already exists; without it each parent has to exist already. |
 | `cat`   | none | One or more files, streamed as raw bytes, or a redirected file read as standard input. |
-| `cp`    | `-r`, `-R` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. |
+| `cp`    | `-r`, `-R`, `-p` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. Permission bits are always carried over; `-p` additionally carries over the access and modification times. Owner and group are not: that needs `chown`, which has no standard library binding, and without root the kernel would only refuse it. |
 | `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
 | `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
 | `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |

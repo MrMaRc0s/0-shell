@@ -1,4 +1,4 @@
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, FileTimes, Metadata};
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 
@@ -19,17 +19,22 @@ use crate::signal;
 /// it points at, while a recursive copy recreates the link itself.
 ///
 /// Permissions are carried over to every file and directory that is created.
-/// One failing operand is reported and the rest are still copied.
+/// `-p` additionally carries over the access and modification times; owner
+/// and group stay whatever creating the file gave them, since setting those
+/// needs a system call the standard library does not expose and, without
+/// root, would only fail. One failing operand is reported and the rest are
+/// still copied.
 pub fn cp<E>(args: &[String], errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    let parsed = match options::parse(args, "rR") {
+    let parsed = match options::parse(args, "rRp") {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("cp", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("cp", &option, errors),
     };
     let recursive = parsed.has('r') || parsed.has('R');
+    let preserve_times = parsed.has('p');
 
     let (destination, sources) = match parsed.operands.split_last() {
         None => return report::missing_file_operand("cp", errors),
@@ -55,7 +60,7 @@ where
             continue;
         };
 
-        copy(CP, source, &target, recursive, errors)?;
+        copy(CP, source, &target, recursive, preserve_times, errors)?;
     }
 
     Ok(())
@@ -72,6 +77,7 @@ pub(super) fn copy<E>(
     source: &Path,
     target: &Path,
     recursive: bool,
+    preserve_times: bool,
     errors: &mut E,
 ) -> io::Result<bool>
 where
@@ -105,7 +111,7 @@ where
             report::message(command.name, &text, errors)?;
             return Ok(false);
         }
-        return copy_directory(command, source, target, &metadata, errors);
+        return copy_directory(command, source, target, &metadata, preserve_times, errors);
     }
 
     if file_type.is_symlink() {
@@ -113,7 +119,7 @@ where
     }
 
     if file_type.is_file() {
-        return copy_file(command, source, target, &metadata, errors);
+        return copy_file(command, source, target, &metadata, preserve_times, errors);
     }
 
     // Devices, FIFOs, and sockets need a node the standard library cannot
@@ -130,6 +136,7 @@ fn copy_file<E>(
     source: &Path,
     target: &Path,
     metadata: &Metadata,
+    preserve_times: bool,
     errors: &mut E,
 ) -> io::Result<bool>
 where
@@ -191,7 +198,25 @@ where
         return Ok(false);
     }
 
+    if preserve_times && let Err(error) = set_times(&writer, metadata) {
+        let subject = format!("preserving timestamps for {}", report::quoted(target));
+        report::io_error(command.name, &subject, &error, errors)?;
+        return Ok(false);
+    }
+
     Ok(true)
+}
+
+/// Gives an open file the source's access and modification times.
+///
+/// Owner and group are left alone: setting those is `chown`, which has no
+/// standard library binding, and without root privilege the kernel would
+/// only refuse it anyway, since an ordinary user may not give a file away.
+fn set_times(file: &File, metadata: &Metadata) -> io::Result<()> {
+    let times = FileTimes::new()
+        .set_accessed(metadata.accessed()?)
+        .set_modified(metadata.modified()?);
+    file.set_times(times)
 }
 
 /// Recreates a symlink at the target, pointing at the same place.
@@ -255,6 +280,7 @@ fn copy_directory<E>(
     source: &Path,
     target: &Path,
     metadata: &Metadata,
+    preserve_times: bool,
     errors: &mut E,
 ) -> io::Result<bool>
 where
@@ -305,7 +331,14 @@ where
         match entry {
             Ok(entry) => {
                 let target = target.join(entry.file_name());
-                complete &= copy(command, &entry.path(), &target, true, errors)?;
+                complete &= copy(
+                    command,
+                    &entry.path(),
+                    &target,
+                    true,
+                    preserve_times,
+                    errors,
+                )?;
             }
             Err(error) => {
                 let subject = format!("cannot read directory {}", report::quoted(source));
@@ -321,6 +354,18 @@ where
         let subject = format!("preserving permissions for {}", report::quoted(target));
         report::io_error(command.name, &subject, &error, errors)?;
         return Ok(false);
+    }
+
+    // Timestamps come last for the same reason: writing the entries above
+    // just moved the directory's own modification time to now, and that is
+    // exactly what this is here to undo.
+    if preserve_times {
+        let opened = File::open(target).and_then(|file| set_times(&file, metadata));
+        if let Err(error) = opened {
+            let subject = format!("preserving timestamps for {}", report::quoted(target));
+            report::io_error(command.name, &subject, &error, errors)?;
+            return Ok(false);
+        }
     }
 
     Ok(complete)
@@ -427,6 +472,70 @@ mod tests {
         cp(&[source, target.clone()], &mut errors).unwrap();
 
         assert_eq!(mode(&target), 0o750);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn leaves_the_timestamp_at_the_moment_of_copying_without_p() {
+        let temp = TempDir::new("cp_no_preserve_times");
+        let source = write(&temp, "old.txt", b"aged\n");
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(&source)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(past))
+            .unwrap();
+        let target = temp.arg("copy.txt");
+        let mut errors = Vec::new();
+
+        cp(&[source, target.clone()], &mut errors).unwrap();
+
+        assert!(fs::metadata(&target).unwrap().modified().unwrap() > past);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn p_preserves_the_modification_time_of_a_file() {
+        let temp = TempDir::new("cp_p_file");
+        let source = write(&temp, "old.txt", b"aged\n");
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(&source)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(past))
+            .unwrap();
+        let target = temp.arg("copy.txt");
+        let mut errors = Vec::new();
+
+        cp(&["-p".to_string(), source, target.clone()], &mut errors).unwrap();
+
+        assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), past);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn p_preserves_the_modification_time_of_a_directory_copied_recursively() {
+        let temp = TempDir::new("cp_p_directory");
+        fs::create_dir(temp.arg("tree")).unwrap();
+        write(&temp, "tree/inside.txt", b"here");
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(temp.arg("tree"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(past))
+            .unwrap();
+        let mut errors = Vec::new();
+
+        cp(
+            &args(&["-rp"])
+                .into_iter()
+                .chain([temp.arg("tree"), temp.arg("copy")])
+                .collect::<Vec<_>>(),
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(temp.arg("copy")).unwrap().modified().unwrap(),
+            past
+        );
         assert!(errors.is_empty());
     }
 

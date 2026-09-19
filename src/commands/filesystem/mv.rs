@@ -165,7 +165,10 @@ where
     // Always recursive: `mv` moves a directory without being asked twice, and a
     // recursive copy is also the one that recreates a symlink rather than
     // duplicating the file it points at.
-    if !cp::copy(MV, source, target, true, errors)? {
+    // `mv` has no `-p` of its own to pass on. A rename preserves every
+    // attribute for free, and the fallback below is standing in for exactly
+    // that, so it carries times over the same way a rename would.
+    if !cp::copy(MV, source, target, true, true, errors)? {
         // The copy said why it stopped. Whatever reached the target stays
         // there, as it does under GNU `mv`, but the source is left alone: a
         // half-copied file is not a moved one.
