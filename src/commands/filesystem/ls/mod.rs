@@ -1,3 +1,4 @@
+mod columns;
 mod long;
 mod time;
 mod users;
@@ -13,6 +14,10 @@ use super::options::{self, Invalid};
 use crate::commands::report;
 use crate::signal;
 use long::Item;
+
+/// The flags `ls` accepts, also read by Tab completion so `ls -<Tab>` offers
+/// exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "aFlR";
 
 /// The escape sequence that ends a colored name. GNU coreutils uses `\e[0m`.
 pub(super) const RESET: &[u8] = b"\x1b[0m";
@@ -65,17 +70,33 @@ pub(super) fn style_of(metadata: &Metadata, colored: bool) -> Option<&'static [u
 /// `-a` adds the hidden entries, `.` and `..` among them. `-F` appends the type
 /// indicator: `/` for a directory, `*` for an executable file, `@` for a
 /// symlink, `|` for a FIFO, and `=` for a socket. `-l` prints the long format,
-/// a `total` line and one aligned row per entry. The flags combine in any
+/// a `total` line and one aligned row per entry. `-R` lists every subdirectory
+/// too, depth-first, heading each one with its path the way several operands
+/// already do; a symlink to a directory is listed but not walked into, which is
+/// what keeps a cycle of links from recursing forever. The flags combine in any
 /// spelling: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same command.
 ///
 /// `colored` turns on GNU's name colors, and only ever for a real terminal. A
 /// piped listing and a redirected one stay byte-identical to the host tool.
-pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E, colored: bool) -> io::Result<()>
+///
+/// `width` is the terminal's width in columns, when the short (non-`-l`)
+/// format is going to a real terminal: GNU arranges that format into as many
+/// columns as fit, down each column before moving to the next, and only ever
+/// prints one name per line when it is not talking to a person. `None` keeps
+/// the one-per-line form regardless — piped, redirected, or a terminal this
+/// system has no way to ask the width of.
+pub fn ls<W, E>(
+    args: &[String],
+    output: &mut W,
+    errors: &mut E,
+    colored: bool,
+    width: Option<usize>,
+) -> io::Result<()>
 where
     W: Write,
     E: Write,
 {
-    let parsed = match options::parse(args, "aFl") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),
@@ -94,6 +115,7 @@ where
     let all = parsed.has('a');
     let classify = parsed.has('F');
     let long = parsed.has('l');
+    let recursive = parsed.has('R');
     // Both flags describe the operand itself, so neither follows a symlink
     // named on the command line.
     let name_the_link = classify || long;
@@ -106,18 +128,13 @@ where
         // whole point of the flag is to say what the operand itself is, and
         // `ls -F dirlink` prints `dirlink@`.
         let path = Path::new(operand);
+        // A dangling symlink named directly is reported missing, matching
+        // GNU: the operand is followed, and there is nothing at the far end
+        // of it to describe.
         let metadata = if name_the_link {
             path.symlink_metadata()
         } else {
-            // A symlink with nothing at the end of it still names something
-            // that is there, so the link itself is described rather than
-            // reported missing. This is the host's behavior; GNU `ls` prints
-            // `cannot access` here instead.
             path.metadata()
-                .or_else(|error| match path.symlink_metadata() {
-                    Ok(metadata) => Ok(metadata),
-                    Err(_) => Err(error),
-                })
         };
 
         match metadata {
@@ -138,7 +155,9 @@ where
 
     // Headers are for telling blocks apart, so one operand needs none, even
     // when the others failed: `ls missing dir` still heads the `dir` block.
-    let headers = operands.len() > 1;
+    // `-R` heads every block regardless, since a directory with subdirectories
+    // of its own is never really just the one block.
+    let headers = operands.len() > 1 || recursive;
     let mut printed = false;
 
     if !files.is_empty() {
@@ -152,6 +171,15 @@ where
                 })
                 .collect::<Vec<_>>();
             long::write(&items, false, classify, colored, output, errors)?;
+        } else if let Some(width) = width {
+            let entries = files
+                .iter()
+                .map(|(file, indicator, style)| columns::Entry {
+                    name: named(file.as_bytes(), indicator),
+                    style: *style,
+                })
+                .collect::<Vec<_>>();
+            columns::write(&entries, width, output)?;
         } else {
             for (file, indicator, style) in files {
                 if signal::is_pending() {
@@ -170,45 +198,85 @@ where
             break;
         }
 
-        let path = Path::new(directory);
-        let names = match read_names(path, all) {
-            Ok(names) => names,
-            Err(error) => {
-                // Reported before any header is written, so a directory that
-                // cannot be read leaves no empty block behind.
-                let subject = format!("cannot open directory {}", report::quoted(directory));
-                report::io_error("ls", &subject, &error, errors)?;
-                continue;
-            }
-        };
+        list_directory(
+            Path::new(directory),
+            directory,
+            all,
+            classify,
+            long,
+            colored,
+            width,
+            recursive,
+            headers,
+            &mut printed,
+            output,
+            errors,
+        )?;
+    }
 
-        if printed {
-            writeln!(output)?;
+    Ok(())
+}
+
+/// Lists one directory, then, with `-R`, every real subdirectory under it.
+///
+/// `label` is what a header names: the operand as it was typed for the
+/// directory itself, and that label with each subdirectory's name joined on
+/// for everything found by recursing into it. A symlink among the entries is
+/// listed like any other name but never walked into, since a link back
+/// upward would otherwise recurse forever.
+#[allow(clippy::too_many_arguments)]
+fn list_directory<W, E>(
+    path: &Path,
+    label: &str,
+    all: bool,
+    classify: bool,
+    long: bool,
+    colored: bool,
+    width: Option<usize>,
+    recursive: bool,
+    headers: bool,
+    printed: &mut bool,
+    output: &mut W,
+    errors: &mut E,
+) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    let names = match read_names(path, all) {
+        Ok(names) => names,
+        Err(error) => {
+            // Reported before any header is written, so a directory that
+            // cannot be read leaves no empty block behind.
+            let subject = format!("cannot open directory {}", report::quoted(label));
+            return report::io_error("ls", &subject, &error, errors);
         }
-        if headers {
-            output.write_all(directory.as_bytes())?;
-            output.write_all(b":\n")?;
-        }
-        printed = true;
+    };
 
-        if long {
-            let items = names
-                .iter()
-                .map(|name| Item {
-                    display: name.as_bytes().to_vec(),
-                    path: path.join(name),
-                    style: None,
-                })
-                .collect::<Vec<_>>();
-            long::write(&items, true, classify, colored, output, errors)?;
-        } else {
-            for name in names {
-                if signal::is_pending() {
-                    break;
-                }
+    if *printed {
+        writeln!(output)?;
+    }
+    if headers {
+        output.write_all(label.as_bytes())?;
+        output.write_all(b":\n")?;
+    }
+    *printed = true;
 
-                let path = path.join(&name);
-                let metadata = path.symlink_metadata().ok();
+    if long {
+        let items = names
+            .iter()
+            .map(|name| Item {
+                display: name.as_bytes().to_vec(),
+                path: path.join(name),
+                style: None,
+            })
+            .collect::<Vec<_>>();
+        long::write(&items, true, classify, colored, output, errors)?;
+    } else if let Some(width) = width {
+        let entries = names
+            .iter()
+            .map(|name| {
+                let metadata = path.join(name).symlink_metadata().ok();
                 let indicator = metadata
                     .as_ref()
                     .map(|metadata| indicator(metadata, classify))
@@ -217,9 +285,71 @@ where
                     .as_ref()
                     .and_then(|metadata| style_of(metadata, colored));
 
-                write_line(name.as_bytes(), indicator, style, output)?;
+                columns::Entry {
+                    name: named(name.as_bytes(), indicator),
+                    style,
+                }
+            })
+            .collect::<Vec<_>>();
+        columns::write(&entries, width, output)?;
+    } else {
+        for name in &names {
+            if signal::is_pending() {
+                break;
             }
+
+            let entry = path.join(name);
+            let metadata = entry.symlink_metadata().ok();
+            let indicator = metadata
+                .as_ref()
+                .map(|metadata| indicator(metadata, classify))
+                .unwrap_or("");
+            let style = metadata
+                .as_ref()
+                .and_then(|metadata| style_of(metadata, colored));
+
+            write_line(name.as_bytes(), indicator, style, output)?;
         }
+    }
+
+    if !recursive {
+        return Ok(());
+    }
+
+    for name in &names {
+        if signal::is_pending() {
+            break;
+        }
+
+        // `.` and `..` name this directory and its parent, and walking into
+        // either would recurse until the process runs out of stack.
+        if name == "." || name == ".." {
+            continue;
+        }
+
+        let entry = path.join(name);
+        // `symlink_metadata` reports a symlink as a link rather than as
+        // whatever it points at, which is what leaves a linked directory
+        // listed but not descended into.
+        if !entry.symlink_metadata().is_ok_and(|entry| entry.is_dir()) {
+            continue;
+        }
+
+        let child_label = format!("{label}/{}", String::from_utf8_lossy(name.as_bytes()));
+        list_directory(
+            &entry,
+            &child_label,
+            all,
+            classify,
+            long,
+            colored,
+            width,
+            recursive,
+            true,
+            printed,
+            output,
+            errors,
+        )?;
     }
 
     Ok(())
@@ -262,6 +392,14 @@ fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
     Ok(names)
+}
+
+/// A name with its `-F` indicator appended, ready for the column layout to
+/// measure and print as one unit.
+fn named(name: &[u8], indicator: &str) -> Vec<u8> {
+    let mut named = name.to_vec();
+    named.extend_from_slice(indicator.as_bytes());
+    named
 }
 
 /// Writes one name, its `-F` indicator, and a newline, as bytes.
@@ -336,7 +474,7 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        ls(operands.as_ref(), &mut output, &mut errors, false).unwrap();
+        ls(operands.as_ref(), &mut output, &mut errors, false, None).unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -348,7 +486,29 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        ls(operands.as_ref(), &mut output, &mut errors, true).unwrap();
+        ls(operands.as_ref(), &mut output, &mut errors, true, None).unwrap();
+
+        (
+            String::from_utf8(output).unwrap(),
+            String::from_utf8(errors).unwrap(),
+        )
+    }
+
+    /// A listing as it would be drawn on a real terminal `width` columns
+    /// wide: the short format arranged into columns rather than one name per
+    /// line.
+    fn listing_at_width<W: AsRef<[String]>>(operands: W, width: usize) -> (String, String) {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        ls(
+            operands.as_ref(),
+            &mut output,
+            &mut errors,
+            false,
+            Some(width),
+        )
+        .unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -470,15 +630,22 @@ mod tests {
         let link = temp.arg("dangling");
         std::os::unix::fs::symlink(temp.arg("nowhere"), &link).unwrap();
 
-        let (named, errors) = listing(vec![link.clone()]);
+        let (named, named_errors) = listing(vec![link.clone()]);
         let (classified, _) = listing(vec!["-F".to_string(), link.clone()]);
         let (missing_output, missing_errors) = listing(vec![temp.arg("nowhere")]);
 
-        assert_eq!(named, format!("{link}\n"));
+        // Followed and found to lead nowhere, as GNU reports it: unlike `-F`
+        // and `-l`, a bare operand is expected to resolve to the file at the
+        // far end, not to the link itself.
+        assert!(named.is_empty());
+        assert_eq!(
+            named_errors,
+            format!("ls: cannot access '{link}': No such file or directory\n")
+        );
         assert_eq!(classified, format!("{link}@\n"));
-        assert!(errors.is_empty());
 
-        // A name with nothing behind it at all is still an error.
+        // A name with nothing behind it at all is still an error, worded the
+        // same way.
         assert!(missing_output.is_empty());
         assert_eq!(
             missing_errors,
@@ -796,9 +963,10 @@ sub/
         let (output, errors) = listing(args(&["-q"]));
         let (_, long) = listing(args(&["--bogus"]));
 
+        let help = "Try 'ls --help' for more information.\n";
         assert!(output.is_empty());
-        assert_eq!(errors, "ls: invalid option -- 'q'\n");
-        assert_eq!(long, "ls: unrecognized option '--bogus'\n");
+        assert_eq!(errors, format!("ls: invalid option -- 'q'\n{help}"));
+        assert_eq!(long, format!("ls: unrecognized option '--bogus'\n{help}"));
     }
 
     #[test]
@@ -851,5 +1019,160 @@ sub/
             "only the name column is wrapped: {}",
             rows[0]
         );
+    }
+
+    #[test]
+    fn recursive_descends_into_every_subdirectory() {
+        let temp = TempDir::new("ls_recursive");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/sub")).unwrap();
+        touch(&temp, "tree/top.txt");
+        touch(&temp, "tree/sub/deep.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        assert_eq!(
+            output,
+            format!("{root}:\nsub\ntop.txt\n\n{root}/sub:\ndeep.txt\n")
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_heads_a_lone_directory_even_without_subdirectories() {
+        let temp = TempDir::new("ls_recursive_flat");
+        let root = temp.arg("flat");
+        fs::create_dir(&root).unwrap();
+        touch(&temp, "flat/only.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        assert_eq!(output, format!("{root}:\nonly.txt\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_lists_a_linked_directory_without_walking_into_it() {
+        let temp = TempDir::new("ls_recursive_symlink");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/real")).unwrap();
+        touch(&temp, "tree/real/inside.txt");
+        std::os::unix::fs::symlink("real", temp.arg("tree/link")).unwrap();
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        // `link` is named in the top block like any other entry, but only
+        // `real` earns a block of its own: recursing into the link too would
+        // print `inside.txt` twice and, for a link back upward, never stop.
+        assert_eq!(
+            output,
+            format!("{root}:\nlink\nreal\n\n{root}/real:\ninside.txt\n")
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_reports_an_unreadable_subdirectory_and_continues() {
+        let temp = TempDir::new("ls_recursive_unreadable");
+        let root = temp.arg("tree");
+        let locked = temp.arg("tree/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::create_dir(temp.arg("tree/open")).unwrap();
+        touch(&temp, "tree/open/inside.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        if errors.is_empty() {
+            // Running as root nothing is unreadable, so there is nothing to test.
+            return;
+        }
+
+        assert_eq!(
+            output,
+            format!("{root}:\nlocked\nopen\n\n{root}/open:\ninside.txt\n")
+        );
+        assert_eq!(
+            errors,
+            format!("ls: cannot open directory '{root}/locked': Permission denied\n")
+        );
+    }
+
+    #[test]
+    fn a_terminal_width_arranges_the_short_format_into_columns() {
+        let temp = TempDir::new("ls_columns");
+        for name in ["one", "two", "three", "four", "five", "six"] {
+            touch(&temp, name);
+        }
+
+        let (output, errors) = listing_at_width(vec![temp.arg("")], 20);
+
+        // Byte-sorted: five, four, one, six, three, two. Six and four
+        // columns both run past 20; three is the widest that still fits.
+        assert_eq!(
+            output,
+            "five  one  three\n\
+             four  six  two\n"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_narrow_terminal_width_still_prints_one_per_line() {
+        let temp = TempDir::new("ls_columns_narrow");
+        touch(&temp, "alpha");
+        touch(&temp, "beta");
+
+        let (output, errors) = listing_at_width(vec![temp.arg("")], 1);
+
+        assert_eq!(output, "alpha\nbeta\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_terminal_width_does_not_touch_the_long_format() {
+        let temp = TempDir::new("ls_columns_long");
+        touch(&temp, "one");
+        touch(&temp, "two");
+
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        ls(
+            &["-l".to_string(), temp.arg("")],
+            &mut output,
+            &mut errors,
+            false,
+            Some(80),
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        // Still one row per entry: a `total` line and two rows, not a single
+        // wide one.
+        assert_eq!(output.lines().count(), 3, "{output}");
+    }
+
+    #[test]
+    fn a_terminal_width_arranges_a_recursive_listing_block_by_block() {
+        let temp = TempDir::new("ls_columns_recursive");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/sub")).unwrap();
+        touch(&temp, "tree/top.txt");
+        touch(&temp, "tree/sub/a");
+        touch(&temp, "tree/sub/b");
+        touch(&temp, "tree/sub/c");
+
+        let (output, errors) = listing_at_width(vec!["-R".to_string(), root.clone()], 6);
+
+        // The top block has two entries at one per line (together too wide
+        // for a 6-column row); `sub`'s three short entries fill two columns
+        // down first, `a` and `b` in the first and `c` alone in the second,
+        // sized to that block alone.
+        assert_eq!(
+            output,
+            format!("{root}:\nsub\ntop.txt\n\n{root}/sub:\na  c\nb\n")
+        );
+        assert!(errors.is_empty());
     }
 }

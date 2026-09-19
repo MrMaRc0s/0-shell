@@ -40,8 +40,9 @@
 //! `<command>: <path>: <reason>` form. The others wrap the path in plain
 //! single quotes and name the action that failed.
 //!
-//! Operand-count errors use the GNU wording, without the trailing
-//! `Try '<command> --help'` line, since this shell has no `--help`:
+//! Operand-count errors use the GNU wording, each followed by the
+//! `Try '<command> --help' for more information.` line GNU follows every
+//! usage mistake with; `crate::commands::help` is what makes that line true:
 //!
 //! * `mkdir: missing operand`
 //! * `rm: missing operand`
@@ -60,6 +61,15 @@
 //! * `cp: omitting special file '<src>'` (a device, FIFO, or socket)
 //! * `mv: cannot move '<src>' to a subdirectory of itself, '<dst>'`
 //!
+//! `-i`'s prompts are fixed wording too, written without a trailing newline
+//! since an answer follows on the same line:
+//!
+//! * `rm: remove regular file '<path>'? ` (a plain file, `regular empty file`
+//!   when it has nothing in it)
+//! * `rm: remove symbolic link '<path>'? `
+//! * `rm: remove directory '<path>'? ` (once its contents are already gone)
+//! * `mv: overwrite '<dst>'? ` (only when the destination already exists)
+//!
 //! `cp` and `mv` share their transfer code, so they share these, each naming
 //! itself and its own verb (`copy` or `move`):
 //!
@@ -77,8 +87,8 @@
 //! `mv: cannot remove '<src>': <reason>`. GNU's `mv` shares its transfer code
 //! the same way and reports the same shapes.
 //!
-//! Unknown flags use the wording `getopt` produces, again without the
-//! `Try '<command> --help'` line:
+//! Unknown flags use the wording `getopt` produces, followed by the same
+//! `Try --help` line:
 //!
 //! * `cp: invalid option -- 'q'`
 //! * `cp: unrecognized option '--bogus'`
@@ -97,6 +107,7 @@
 //! `io::Error` directly with `{}`.
 
 mod cat;
+mod confirm;
 mod cp;
 mod ls;
 mod mkdir;
@@ -113,3 +124,19 @@ pub use mkdir::mkdir;
 pub use mv::mv;
 pub use rm::rm;
 pub use touch::touch;
+
+/// The flag letters `command` accepts, for Tab completion to offer after a
+/// dash. `None` covers both a name this shell does not answer to and one that
+/// takes no flags at all (`cat`), which completion treats alike: nothing to
+/// offer.
+pub fn options(command: &str) -> Option<&'static str> {
+    Some(match command {
+        "cp" => cp::OPTIONS,
+        "ls" => ls::OPTIONS,
+        "mkdir" => mkdir::OPTIONS,
+        "mv" => mv::OPTIONS,
+        "rm" => rm::OPTIONS,
+        "touch" => touch::OPTIONS,
+        _ => return None,
+    })
+}

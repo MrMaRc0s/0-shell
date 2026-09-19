@@ -302,7 +302,10 @@ mod tests {
         let (output, errors) = run(&[], None);
 
         assert!(output.is_empty());
-        assert_eq!(errors, "cat: missing operand\n");
+        assert_eq!(
+            errors,
+            "cat: missing operand\nTry 'cat --help' for more information.\n"
+        );
     }
 
     #[test]

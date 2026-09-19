@@ -34,15 +34,24 @@ The implementation order and two-developer work split are recorded in
 | `clear` | none | Clears the screen and its scrollback (past commands) and homes the cursor, so the shell is left alone at the top. Arguments are ignored. |
 | `mkdir` | `-p` | One or more directories. `-p` creates each operand's missing parents in one go and passes over a directory that already exists; without it each parent has to exist already. |
 | `cat`   | none | One or more files, streamed as raw bytes, or a redirected file read as standard input. |
-| `cp`    | `-r`, `-R` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. |
-| `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
-| `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
-| `ls`    | `-l`, `-a`, `-F` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. |
+| `cp`    | `-r`, `-R`, `-p` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. Permission bits are always carried over; `-p` additionally carries over the access and modification times. Owner and group are not: that needs `chown`, which has no standard library binding, and without root the kernel would only refuse it. |
+| `mv`    | `-i` | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. `-i` asks before overwriting an existing destination. |
+| `rm`    | `-r`, `-R`, `-f`, `-i` | Refuses a directory without `-r`. `-i` asks before every removal, file by file even inside a recursive tree; `-f` silences it. |
+| `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is, and the short format is arranged into columns; piped output stays plain and one name per line. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
+| `type`  | none | Says whether each name is one of this shell's own commands, the way bash's builtin does for one of its. With no operand it says nothing, which is also what bash does. |
+| `which` | none | The same question `type` answers, in the wording the standalone `which` uses. There is no `$PATH` to search and so no path to print: this shell runs no external program, and the honest answer is only ever "one of mine" or "not mine". |
 
 Options may appear in any position, `--` ends option parsing, and an unknown
 option is refused (`ls: invalid option -- 'x'`) rather than taken for a
 filename.
+
+Every command answers `--help`, anywhere on its line, ahead of its own option
+parsing — `cp -z --help` prints usage rather than complaining about `-z`. The
+text is this shell's own: a short reminder of the flags actually implemented,
+not the page GNU's own `--help` prints. It exists mainly so the line GNU
+follows a usage mistake with is telling the truth: `cp: missing file
+operand`, then `Try 'cp --help' for more information.`.
 
 Anything else is reported as `Command 'name' not found`, and the shell carries
 on. No command aborts the shell, and a failing operand never stops the ones
@@ -60,10 +69,19 @@ cannot be opened stops only its command —
 `cat: (standard input)`. `>>`, `>`, and `<` are recognised only outside quotes,
 so a file name can genuinely contain them.
 
+`rm -i` and `mv -i` read their yes-or-no answers the same way: from a file
+redirected with `<` when there is one, from the terminal itself when a person
+is sitting at one, and, lacking both — a piped, non-interactive run with no
+redirection of its own — from nowhere at all. That last case answers every
+question no rather than blocking on a standard input the shell's own script
+reader already owns, the same answer GNU gives a prompt that runs into end of
+input instead of a line.
+
 On a real terminal, `ls` also colours its output the way GNU's `--color=auto`
 does: directories in bold blue, executables in bold green, FIFOs in yellow,
-sockets and symlinks in their own colours. Piped or redirected output is plain
-bytes, exactly as before.
+sockets and symlinks in their own colours, and arranges the short format into
+columns sized to the terminal's width. Piped or redirected output is plain
+bytes, one name per line, exactly as before.
 
 ### What `cp` and `mv` do with the awkward cases
 
@@ -123,9 +141,12 @@ that cannot be interrupted and one that can, the escape hatch is worth more.
 
 ### Auto-completion
 
-The first word of a line completes against this shell's own command names; every
-other word completes against the filesystem. One candidate is filled in whole,
-with a trailing space, or a `/` when it is a directory so the path can be walked
+The first word of a line completes against this shell's own command names. A
+later word starting with a dash completes against that command's own flags
+instead: `ls -` offers `-l`, `-a`, `-F`, `-R`, and a flag already typed clusters
+the rest onto it, so `ls -l` next offers `-la`, `-lF`, `-lR`. Every other word
+completes against the filesystem. One candidate is filled in whole, with a
+trailing space, or a `/` when it is a directory so the path can be walked
 further. Several candidates fill in as much as they all agree on, and list
 themselves when they agree on nothing more. Hidden files stay hidden until the
 leading dot is typed.
@@ -138,35 +159,61 @@ name from `$PATH` would complete to something that answers
 
 Up and Down walk through the lines entered this session, keeping the half-typed
 line so Down returns to it. Blank lines and immediate repeats are not recorded.
-History lives in memory for the session and is not written to a file.
 
-### What the editor does not do
+History also survives between sessions, in `$HOME/.0-shell_history`, one line
+per entry, oldest first — the same shape bash's own history file takes. A new
+session reads it in before the first prompt, and every line kept during the
+session is appended to it as it is entered, not only rewritten at exit, so a
+crash or a `kill` loses nothing already typed. A session with no `$HOME`, or a
+history file that cannot be read or written, is not an error: history simply
+does not survive it, the same way it already does not survive a piped run.
 
-A line longer than the terminal is wide will wrap, and the redraw does not track
-the extra rows, so a very long command can leave the display untidy until the
-next prompt. Pressing Escape on its own is not resolved until the next keypress,
-because a lone escape is indistinguishable from the start of an arrow key
-without a timer.
+### Escape, on its own
+
+Pressing Escape on its own sends one byte, indistinguishable from the start of
+an arrow key until whatever would have followed either does or does not show
+up. Resolving that needs a timer: wait a short while (25ms, long enough that a
+real escape sequence — sent in one burst by the terminal — is never split into
+two keys) for another byte, and read it as a lone Escape if none arrives. There
+is no dedicated wait syscall in `src/terminal/raw.rs`; the wait polls
+`FIONREAD`, the same ioctl call used everywhere else in that module, in a short
+sleep loop instead of adding a fifth syscall's numbers and argument layout to
+get right blind on four systems already.
+
+### Long lines
+
+A line longer than the terminal is wide wraps, the way typed text always has,
+and a redraw now tracks the extra rows rather than losing the cursor to them.
+Knowing the terminal's width (the same `TIOCGWINSZ` `ls` reads for its own
+columns) turns "how many characters" into "which row and column," for both the
+whole line and the cursor's own place in it. A redraw walks back up to the
+first row of whatever it drew last time, erases from there to the end of the
+screen — covering a line that just grew *or* shrank — and draws again, ending
+by walking out to the cursor's row and column rather than trusting wherever
+the terminal parked the cursor after auto-wrapping the text just written. That
+parked position is genuinely ambiguous exactly on a row boundary — still the
+last row, one column past the last character, or already the next, empty
+one? — which is why the walk starts from a known anchor instead of trusting it.
+Without a known width — a terminal this system cannot ask, or none at all —
+the line is drawn the way it always was, as a single row.
 
 ## Deviations from GNU behavior
 
-### `ls` prints one entry per line, always
+### `ls` in columns on a real terminal
 
 The real `ls` prints in columns when its output is a terminal and one per line
 when it is piped or redirected, which is why `ls | cat` looks different from
-`ls`. Columns need the terminal width, which comes from the `TIOCGWINSZ` ioctl.
+`ls`. Columns need the terminal width, which comes from the `TIOCGWINSZ` ioctl,
+issued the same way the three raw-mode ioctls in `src/terminal/raw.rs` already
+are.
 
-This was once impossible here and no longer is: `src/terminal/raw.rs` issues
-ioctls directly for the line editor, and asking for the width would be a third
-one. Staying with one entry per line is now a choice rather than a limit. It is
-the form the host tool itself falls back to, so a side by side comparison shows
-the same names in the same order and `ls | cat` on the host matches this shell
-exactly. Columns would make that comparison depend on both terminals being the
-same width.
-
-So an auditor comparing side by side sees the same names in the same order, one
-per line instead of in columns. `ls | cat` in the host terminal produces exactly
-what `0-shell` produces.
+The short format is arranged the way GNU's own is: as many columns as fit the
+width, sized independently, filling down each column before moving on to the
+next, and only ever on a real terminal. Piped or redirected output keeps the
+one-per-line form regardless, unchanged from before, which is also the form
+the host tool itself falls back to there: a side by side comparison through
+`ls | cat` still shows the same names in the same order on both. `-l` never
+uses columns, on a real terminal or off one, which is also what GNU does.
 
 Entries are sorted by raw byte value, which is what the host tool does here and
 what GNU `ls` does under `LC_ALL=C`. A GNU `ls` running in a locale with its own
@@ -187,27 +234,42 @@ source resolves fewer names than the real `ls` would.
 
 Times are local, and the offset comes from the compiled zone file the system
 points at: `$TZ` when it names a zone, `/etc/localtime` otherwise. Daylight
-saving is honoured, since the file records every changeover. Two limits: a `TZ`
-holding rules rather than a zone name (`EET-2EEST,M3.5.0/3`) falls back to UTC,
-and a timestamp past the last changeover a zone file lists, which on this system
-is in 2037, keeps the last known offset instead of applying the file's trailing
-rule.
+saving is honoured, since the file records every changeover.
 
-One more difference worth knowing about, this one against GNU rather than the
-host: given a symbolic link whose target is gone, `0-shell` prints the link's
-own name, as the host tool does. GNU `ls` reports
-`ls: cannot access 'name': No such file or directory` instead.
+A `TZ` holding rules rather than a zone name, `EET-2EEST,M3.5.0/3,M10.5.0/4`,
+is read as a self-contained rule once a file by that name fails to turn up —
+that string is not a path under `/usr/share/zoneinfo` any zone file lives at.
+The same reader also handles what a zone file itself carries past the last
+changeover it bothered to record, which on this system is some time in 2037:
+every such file from format version 2 onward appends its own trailing rule, a
+line just like `TZ` itself can hold, meant to be applied from there on.
+`src/commands/filesystem/ls/time/posix.rs` reads the common shape both take —
+a month, a week within it, and a day of the week, `Mmonth.week.day` — which is
+the only shape a zone file on this system actually uses. The rarer Julian-day
+forms POSIX also allows are left unparsed rather than taken on faith, and fall
+back to whatever the caller already did without a rule at all: UTC for a `TZ`
+naming one directly, the last known offset for a timestamp past a zone file's
+final changeover.
+
+A symbolic link named directly, with its target gone, is reported missing:
+`ls: cannot access 'name': No such file or directory`, the same wording a
+missing name gets. That is GNU's answer. The host tool installed here,
+[uutils coreutils](https://github.com/uutils/coreutils), prints the link's own
+name instead and calls it done, so a side-by-side comparison against it will
+disagree on this one case; matching real GNU is the choice that holds up
+against the tool the audit is actually worded around.
 
 ### Error messages
 
-Messages follow GNU's wording, with two deliberate departures.
+Messages follow GNU's wording, with one deliberate departure.
 
 The operating system's own text is used for the reason, so it stays correct in
 any locale, but Rust's errno suffix is stripped: `No such file or directory`,
 not `No such file or directory (os error 2)`.
 
-GNU follows an operand error with `Try 'cp --help' for more information.`. That
-line is left out, because this shell has no `--help` to try.
+GNU follows an operand or option error with `Try 'cp --help' for more
+information.`, and so does this shell: every command answers `--help`, so the
+line is telling the truth rather than pointing at nothing.
 
 ## Comparing against the host terminal
 

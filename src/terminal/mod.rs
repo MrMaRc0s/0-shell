@@ -19,6 +19,7 @@ mod raw;
 use std::io::{self, BufRead, ErrorKind, IsTerminal, Stdin, Write};
 
 use editor::Editor;
+use history::History;
 use raw::RawMode;
 
 /// How a line of input ended.
@@ -128,7 +129,7 @@ impl Terminal {
         drop(RawMode::enter(&input).ok()?);
 
         Some(Self {
-            editor: Editor::default(),
+            editor: Editor::new(History::load()),
             input,
         })
     }
@@ -145,4 +146,12 @@ impl LineSource for Terminal {
     fn needs_fresh_line(&self) -> bool {
         true
     }
+}
+
+/// Standard output's width in columns, or `None` when it is not a real
+/// terminal or this system has no way to ask one for its size. `ls` reads
+/// this to decide whether to arrange its short format into columns, the way
+/// GNU's own does only ever on a real terminal.
+pub fn width() -> Option<usize> {
+    raw::terminal_width(&io::stdout())
 }

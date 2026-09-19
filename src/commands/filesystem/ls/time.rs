@@ -7,8 +7,11 @@
 //! otherwise be `chrono` and libc, and `Cargo.toml` has no dependencies.
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
+
+mod posix;
 
 const SECONDS_PER_DAY: i64 = 86_400;
 
@@ -37,6 +40,10 @@ pub struct Zone {
     offsets: Vec<i32>,
     /// The offset in force before the first transition.
     initial: i32,
+    /// How to compute the offset past the last transition — a zone file's
+    /// own trailing rule, or, for a `TZ` that named rules directly instead of
+    /// a zone, the only rule there is.
+    beyond: Option<posix::Rule>,
 }
 
 impl Zone {
@@ -44,10 +51,18 @@ impl Zone {
     ///
     /// `TZ` is honoured the way the C library honours it, since the real `ls`
     /// answers to it and a listing compared against one has to agree. A `TZ`
-    /// naming rules rather than a zone (`EET-2EEST,M3.5.0/3`) is not
-    /// understood and falls back to UTC.
+    /// naming rules rather than a zone, `EET-2EEST,M3.5.0/3`, is read as a
+    /// self-contained rule once a file by that name fails to turn up —
+    /// `EET-2EEST,M3.5.0/3` is not a path under `/usr/share/zoneinfo` any
+    /// zone file lives at.
     pub fn local() -> Self {
-        Self::from_path(&zone_path()).unwrap_or_else(Self::utc)
+        if let Some(zone) = Self::from_path(&zone_path()) {
+            return zone;
+        }
+        if let Some(zone) = env::var_os("TZ").as_deref().and_then(Self::from_tz_var) {
+            return zone;
+        }
+        Self::utc()
     }
 
     /// A zone with one fixed offset, used where no zone file is involved.
@@ -56,7 +71,30 @@ impl Zone {
             transitions: Vec::new(),
             offsets: Vec::new(),
             initial: offset,
+            beyond: None,
         }
+    }
+
+    /// Reads `TZ` itself as a POSIX rule, for the case a zone file lookup
+    /// already failed. A leading colon means the rest names a file, which has
+    /// already been tried and found missing, so that spelling is not read as
+    /// a rule on top of it.
+    fn from_tz_var(tz: &OsStr) -> Option<Self> {
+        let tz = tz.to_str()?;
+        if tz.starts_with(':') {
+            return None;
+        }
+
+        let rule = posix::parse(tz)?;
+        Some(Self {
+            transitions: Vec::new(),
+            offsets: Vec::new(),
+            // Never actually read: with no transitions, `offset` always
+            // finds itself past the last one — there is none — and defers
+            // to `beyond` instead.
+            initial: 0,
+            beyond: Some(rule),
+        })
     }
 
     fn utc() -> Self {
@@ -76,7 +114,19 @@ impl Zone {
 
     /// The offset from UTC in force at this instant, in seconds.
     pub fn offset(&self, timestamp: i64) -> i32 {
-        // The last transition at or before the instant decides it.
+        // Past the last transition the table has nothing more to say, and
+        // `beyond` takes over — a zone file's own trailing rule, or, when
+        // there were never any transitions to begin with, the only rule a
+        // `TZ` that named one directly ever had.
+        let past_last_transition = match self.transitions.last() {
+            Some(last) => timestamp > *last,
+            None => true,
+        };
+        if past_last_transition && let Some(rule) = &self.beyond {
+            return rule.offset_at(timestamp);
+        }
+
+        // Otherwise the last transition at or before the instant decides it.
         let index = self
             .transitions
             .partition_point(|start| *start <= timestamp);
@@ -90,10 +140,14 @@ impl Zone {
 
     /// Reads a compiled zone file, in either the original or the 64-bit layout.
     ///
-    /// Beyond the last transition a zone file expects its trailing rule string
-    /// to be applied; this keeps the last known offset instead. Zone files on
-    /// this system carry transitions through 2037, so only a timestamp past
-    /// that, in a zone that still changes its clocks, would notice.
+    /// Beyond the last transition a zone file carries its own trailing rule,
+    /// a POSIX `TZ` string on a line by itself at the very end of the file
+    /// from format version 2 onward, meant to be applied from there on. Zone
+    /// files on this system carry transitions through 2037, so only a
+    /// timestamp past that, in a zone that still changes its clocks, ever
+    /// reaches it; a rule this module does not understand — a Julian-day one,
+    /// mainly — falls back to the last known offset instead, unchanged from
+    /// before this was read at all.
     fn from_tzif(data: &[u8]) -> Option<Self> {
         if data.get(..4)? != b"TZif" {
             return None;
@@ -151,12 +205,32 @@ impl Zone {
             .and_then(type_offset)
             .unwrap_or(0);
 
+        // Only a version-2-or-later file carries the trailing rule at all;
+        // the original format ends right where the data block does.
+        let beyond = if version >= b'2' {
+            footer(data, start + counts.block_size(width))
+        } else {
+            None
+        };
+
         Some(Self {
             transitions,
             offsets,
             initial,
+            beyond,
         })
     }
+}
+
+/// The rule on the line a version-2+ zone file appends after its data block:
+/// `\n<rule>\n`, on its own, meant to be applied from the last recorded
+/// transition onward. `None` for a file with nothing there, or a rule this
+/// module does not understand.
+fn footer(data: &[u8], start: usize) -> Option<posix::Rule> {
+    let text = std::str::from_utf8(data.get(start..)?).ok()?;
+    let text = text.strip_prefix('\n')?;
+    let end = text.find('\n')?;
+    posix::parse(&text[..end])
 }
 
 /// The six counts in a zone file header, which size everything after it.
@@ -293,6 +367,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod tests {
     use super::{MAX_ZONE_FILE_SIZE, Zone, civil_from_days, stamp};
     use crate::testing::TempDir;
+    use std::ffi::OsStr;
     use std::fs;
 
     #[test]
@@ -398,5 +473,112 @@ mod tests {
         data[0..4].copy_from_slice(b"TZif");
         fs::write(&path, &data).unwrap();
         assert!(Zone::from_path(&path).is_some());
+    }
+
+    #[test]
+    fn a_tz_naming_rules_directly_is_read_as_a_rule_rather_than_falling_back_to_utc() {
+        // The example the README used to name as unsupported: Athens' own
+        // rule, naming its standard and daylight-saving offsets and the
+        // dates that switch between them, with no zone file involved at all.
+        let zone = Zone::from_tz_var(OsStr::new("EET-2EEST,M3.5.0/3,M10.5.0/4")).unwrap();
+
+        assert_eq!(
+            zone.offset(1_767_225_600),
+            2 * 3_600,
+            "2026-01-01: standard"
+        );
+        assert_eq!(
+            zone.offset(1_782_950_400),
+            3 * 3_600,
+            "2026-07-01: daylight saving"
+        );
+    }
+
+    #[test]
+    fn a_tz_naming_a_file_explicitly_is_not_read_as_a_rule() {
+        // A leading colon means "the rest is a file name", already tried and
+        // already missing by the time this is reached; reading the same text
+        // as a rule on top of that would make an explicit file reference
+        // silently resolve to something else instead of just failing.
+        assert!(Zone::from_tz_var(OsStr::new(":EET-2EEST,M3.5.0/3,M10.5.0/4")).is_none());
+    }
+
+    #[test]
+    fn a_zone_file_with_a_trailing_rule_extrapolates_past_its_last_transition() {
+        // Built by hand rather than read from a real file, so the test does
+        // not depend on transition tables that will themselves eventually
+        // run out: one transition, then a footer good for anything after it.
+        let mut header = vec![0u8; 44];
+        header[0..4].copy_from_slice(b"TZif");
+        header[4] = b'2';
+        // A version-1 block with one transition and one type, skipped over
+        // (this module reads the version-2 copy that follows it).
+        header[20..24].copy_from_slice(&0u32.to_be_bytes()); // isutcnt
+        header[24..28].copy_from_slice(&0u32.to_be_bytes()); // isstdcnt
+        header[28..32].copy_from_slice(&0u32.to_be_bytes()); // leapcnt
+        header[32..36].copy_from_slice(&1u32.to_be_bytes()); // timecnt
+        header[36..40].copy_from_slice(&1u32.to_be_bytes()); // typecnt
+        header[40..44].copy_from_slice(&0u32.to_be_bytes()); // charcnt
+        let v1_transition = 0i32.to_be_bytes(); // 1970-01-01
+        let v1_type_index = [0u8];
+        let v1_type = {
+            let mut t = vec![0u8; 6];
+            t[0..4].copy_from_slice(&(-5 * 3_600i32).to_be_bytes());
+            t
+        };
+        header.extend_from_slice(&v1_transition);
+        header.extend_from_slice(&v1_type_index);
+        header.extend_from_slice(&v1_type);
+
+        // The version-2 header and block: the same single transition, this
+        // time as an 8-byte timestamp, and no offset after it but the
+        // footer's own rule.
+        let mut v2 = vec![0u8; 44];
+        v2[0..4].copy_from_slice(b"TZif");
+        v2[4] = b'2';
+        v2[32..36].copy_from_slice(&1u32.to_be_bytes()); // timecnt
+        v2[36..40].copy_from_slice(&1u32.to_be_bytes()); // typecnt
+        let v2_transition = 0i64.to_be_bytes();
+        let v2_type_index = [0u8];
+        let mut v2_type = vec![0u8; 6];
+        v2_type[0..4].copy_from_slice(&(-5 * 3_600i32).to_be_bytes());
+        v2.extend_from_slice(&v2_transition);
+        v2.extend_from_slice(&v2_type_index);
+        v2.extend_from_slice(&v2_type);
+        v2.extend_from_slice(b"\nEST5EDT,M3.2.0,M11.1.0/2\n");
+
+        header.extend_from_slice(&v2);
+
+        let zone = Zone::from_tzif(&header).unwrap();
+
+        // At the one recorded transition, the table's own offset.
+        assert_eq!(zone.offset(0), -5 * 3_600);
+        // Decades past it, in July: the footer's rule, daylight saving.
+        assert_eq!(zone.offset(1_782_950_400), -4 * 3_600, "2026-07-01");
+        // And in January: the footer's rule, standard time.
+        assert_eq!(zone.offset(1_767_225_600), -5 * 3_600, "2026-01-01");
+    }
+
+    #[test]
+    fn the_actual_system_zoneinfo_footers_this_module_targets_still_parse() {
+        // The exact strings a handful of real zone files on a typical Linux
+        // system carry, read straight from disk rather than retyped, so a
+        // change to either this parser or those files' own format is caught.
+        for zone in [
+            "America/New_York",
+            "Europe/Athens",
+            "Pacific/Auckland",
+            "UTC",
+        ] {
+            let path = format!("/usr/share/zoneinfo/{zone}");
+            let Ok(data) = fs::read(&path) else {
+                continue;
+            };
+
+            assert!(
+                Zone::from_tzif(&data).is_some(),
+                "{zone}'s own zone file failed to parse"
+            );
+        }
     }
 }

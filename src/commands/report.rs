@@ -63,23 +63,37 @@ where
     detail(command, subject, &reason(error), errors)
 }
 
-/// Writes `<command>: missing operand`, used by `mkdir` and `rm`.
+/// Writes `Try '<command> --help' for more information.`, the line GNU
+/// follows every usage mistake with.
+fn try_help<E>(command: &str, errors: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    writeln!(errors, "Try '{command} --help' for more information.")
+}
+
+/// Writes `<command>: missing operand`, used by `mkdir` and `rm`, followed by
+/// the `Try --help` line every usage mistake gets.
 pub fn missing_operand<E>(command: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    message(command, "missing operand", errors)
+    message(command, "missing operand", errors)?;
+    try_help(command, errors)
 }
 
-/// Writes `<command>: missing file operand`, used by `cp` and `mv`.
+/// Writes `<command>: missing file operand`, used by `cp` and `mv`, followed
+/// by the `Try --help` line every usage mistake gets.
 pub fn missing_file_operand<E>(command: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    message(command, "missing file operand", errors)
+    message(command, "missing file operand", errors)?;
+    try_help(command, errors)
 }
 
-/// Writes `<command>: missing destination file operand after '<source>'`.
+/// Writes `<command>: missing destination file operand after '<source>'`,
+/// followed by the `Try --help` line every usage mistake gets.
 pub fn missing_destination_operand<E>(command: &str, source: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
@@ -88,23 +102,28 @@ where
         command,
         &format!("missing destination file operand after {}", quoted(source)),
         errors,
-    )
+    )?;
+    try_help(command, errors)
 }
 
-/// Writes `<command>: invalid option -- '<flag>'`.
+/// Writes `<command>: invalid option -- '<flag>'`, followed by the
+/// `Try --help` line every usage mistake gets.
 pub fn invalid_option<E>(command: &str, flag: char, errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    message(command, &format!("invalid option -- '{flag}'"), errors)
+    message(command, &format!("invalid option -- '{flag}'"), errors)?;
+    try_help(command, errors)
 }
 
-/// Writes `<command>: unrecognized option '<option>'`.
+/// Writes `<command>: unrecognized option '<option>'`, followed by the
+/// `Try --help` line every usage mistake gets.
 pub fn unrecognized_option<E>(command: &str, option: &str, errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    message(command, &format!("unrecognized option '{option}'"), errors)
+    message(command, &format!("unrecognized option '{option}'"), errors)?;
+    try_help(command, errors)
 }
 
 #[cfg(test)]
@@ -189,8 +208,11 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             "mkdir: missing operand\n\
+             Try 'mkdir --help' for more information.\n\
              cp: missing file operand\n\
-             mv: missing destination file operand after 'source.txt'\n"
+             Try 'cp --help' for more information.\n\
+             mv: missing destination file operand after 'source.txt'\n\
+             Try 'mv --help' for more information.\n"
         );
     }
 
@@ -204,7 +226,24 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             "cp: invalid option -- 'q'\n\
-             cp: unrecognized option '--bogus'\n"
+             Try 'cp --help' for more information.\n\
+             cp: unrecognized option '--bogus'\n\
+             Try 'cp --help' for more information.\n"
+        );
+    }
+
+    #[test]
+    fn every_usage_mistake_ends_with_the_try_help_line() {
+        let mut errors = Vec::new();
+
+        missing_operand("rm", &mut errors).unwrap();
+
+        assert!(
+            String::from_utf8(errors)
+                .unwrap()
+                .ends_with("Try 'rm --help' for more information.\n"),
+            "GNU follows a usage mistake with this line, now that there is a \
+             --help to try"
         );
     }
 }

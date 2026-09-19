@@ -34,9 +34,16 @@ pub enum Key {
 }
 
 /// Reads one keypress, or `None` once the input has ended.
-pub fn read_key<R>(input: &mut R) -> io::Result<Option<Key>>
+///
+/// `ready` answers one question, asked only right after a lone `ESC` byte:
+/// has another byte arrived yet. The real terminal answers it by polling the
+/// kernel for a short while; a test answers it outright, `true` to resolve an
+/// escape sequence the way a complete one already in the buffer would, `false`
+/// to resolve a lone Escape the way running out of input would.
+pub fn read_key<R, F>(input: &mut R, ready: F) -> io::Result<Option<Key>>
 where
     R: Read,
+    F: FnOnce() -> bool,
 {
     let Some(byte) = read_byte(input)? else {
         return Ok(None);
@@ -54,7 +61,7 @@ where
         0x05 => Key::End,
         // Terminals disagree about which of these Backspace sends.
         0x08 | 0x7f => Key::Backspace,
-        0x1b => read_escape(input)?,
+        0x1b => read_escape(input, ready)?,
         // The remaining control bytes have no meaning here.
         byte if byte < 0x20 => Key::Ignored,
         byte => match read_character(input, byte)? {
@@ -93,14 +100,23 @@ where
 /// are read next as ordinary text: stopping early on `ESC [ 1 ; 5 C`, which is
 /// Ctrl+Right, types a literal `5C` into the line.
 ///
-/// Pressing Escape on its own sends the one byte and nothing follows, so this
-/// waits for a key that may not be coming; the next keypress resolves it. A
-/// timeout would be the alternative, and it would cost an ioctl on every escape
-/// to buy a case a shell rarely meets.
-fn read_escape<R>(input: &mut R) -> io::Result<Key>
+/// Pressing Escape on its own sends the one byte and nothing follows it, which
+/// looks identical, byte for byte, to the start of a sequence whose rest just
+/// has not arrived yet — the only way to tell the two apart is to wait a
+/// little and see. `ready` is that wait, already spent by the time this runs:
+/// answering `false` resolves a lone Escape at once rather than blocking on a
+/// second byte that was never coming, and the next keystroke is read fresh
+/// rather than being swallowed trying to complete a sequence that already
+/// ended.
+fn read_escape<R, F>(input: &mut R, ready: F) -> io::Result<Key>
 where
     R: Read,
+    F: FnOnce() -> bool,
 {
+    if !ready() {
+        return Ok(Key::Ignored);
+    }
+
     let Some(introducer) = read_byte(input)? else {
         return Ok(Key::Ignored);
     };
@@ -197,11 +213,16 @@ mod tests {
     use super::{Key, read_key};
 
     /// Decodes an entire byte stream into the keys it represents.
+    ///
+    /// `ready` always answers `true`: every sequence here is handed over
+    /// whole, so there is always a next byte already sitting in the buffer
+    /// for an escape to find, the same as a real terminal that already
+    /// finished sending one by the time this module gets around to asking.
     fn keys(bytes: &[u8]) -> Vec<Key> {
         let mut input = Cursor::new(bytes.to_vec());
         let mut pressed = Vec::new();
 
-        while let Some(key) = read_key(&mut input).unwrap() {
+        while let Some(key) = read_key(&mut input, || true).unwrap() {
             pressed.push(key);
         }
 
@@ -293,6 +314,28 @@ mod tests {
     fn reports_the_end_of_the_input() {
         let mut input = Cursor::new(Vec::new());
 
-        assert_eq!(read_key(&mut input).unwrap(), None);
+        assert_eq!(read_key(&mut input, || true).unwrap(), None);
+    }
+
+    #[test]
+    fn a_lone_escape_resolves_to_ignored_without_reading_past_it() {
+        // `ready` says no: nothing else arrived in time, so this is a lone
+        // Escape rather than the start of a sequence.
+        let mut input = Cursor::new(b"\x1ba".to_vec());
+
+        let first = read_key(&mut input, || false).unwrap();
+        let second = read_key(&mut input, || true).unwrap();
+
+        // The Escape resolves on its own, and `a` is still there to be read
+        // next rather than having been consumed trying to complete a sequence.
+        assert_eq!(first, Some(Key::Ignored));
+        assert_eq!(second, Some(Key::Char('a')));
+    }
+
+    #[test]
+    fn a_complete_sequence_still_resolves_when_ready_says_yes() {
+        let mut input = Cursor::new(b"\x1b[A".to_vec());
+
+        assert_eq!(read_key(&mut input, || true).unwrap(), Some(Key::Up));
     }
 }

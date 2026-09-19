@@ -1,10 +1,14 @@
 mod filesystem;
+mod help;
 pub(crate) mod report;
 mod session;
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use crate::parser::ParsedCommand;
+
+/// The flag letters a command accepts, for Tab completion after a dash.
+pub use filesystem::options as command_options;
 
 /// Every command name this shell answers to, for Tab completion.
 ///
@@ -12,8 +16,9 @@ use crate::parser::ParsedCommand;
 /// offered here that `dispatch` does not know would complete to
 /// `Command 'name' not found`. Deliberately not drawn from `$PATH`, since this
 /// shell runs no external program and would be offering names it cannot run.
-pub const COMMAND_NAMES: [&str; 12] = [
-    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch",
+pub const COMMAND_NAMES: [&str; 14] = [
+    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch", "type",
+    "which",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,15 +29,28 @@ pub enum CommandAction {
 
 pub fn dispatch<W, E>(
     command: &ParsedCommand,
-    input: Option<&mut dyn Read>,
+    input: Option<&mut dyn BufRead>,
     output: &mut W,
     errors: &mut E,
     colored: bool,
+    width: Option<usize>,
+    interactive_terminal: bool,
 ) -> io::Result<CommandAction>
 where
     W: Write,
     E: Write,
 {
+    // Checked once, ahead of every command's own option parsing, the way GNU
+    // itself notices `--help` before erroring out on anything else wrong with
+    // the arguments. A name this shell does not answer to gets no help text
+    // and falls through to the usual "not found", `--help` or not.
+    if command.args.iter().any(|arg| arg == "--help")
+        && let Some(text) = help::text(&command.name)
+    {
+        output.write_all(text.as_bytes())?;
+        return Ok(CommandAction::Continue);
+    }
+
     match command.name.as_str() {
         "echo" => {
             session::echo(&command.args, output)?;
@@ -56,6 +74,9 @@ where
             Ok(CommandAction::Continue)
         }
         "cat" => {
+            // `cat` only ever reads, so a `dyn BufRead` serves it exactly as
+            // a `dyn Read` would; the supertrait coercion needs stating.
+            let input = input.map(|reader| reader as &mut dyn Read);
             filesystem::cat(&command.args, input, output, errors)?;
             Ok(CommandAction::Continue)
         }
@@ -64,19 +85,31 @@ where
             Ok(CommandAction::Continue)
         }
         "mv" => {
-            filesystem::mv(&command.args, errors)?;
+            filesystem::mv(&command.args, input, interactive_terminal, errors)?;
             Ok(CommandAction::Continue)
         }
         "rm" => {
-            filesystem::rm(&command.args, errors)?;
+            filesystem::rm(&command.args, input, interactive_terminal, errors)?;
             Ok(CommandAction::Continue)
         }
         "ls" => {
-            filesystem::ls(&command.args, output, errors, colored)?;
+            // `colored` is already this stream's own answer to "is this
+            // really a terminal", redirection included; the short format's
+            // columns follow it for the same reason GNU's do.
+            let width = if colored { width } else { None };
+            filesystem::ls(&command.args, output, errors, colored, width)?;
             Ok(CommandAction::Continue)
         }
         "touch" => {
             filesystem::touch(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "type" => {
+            session::type_of(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "which" => {
+            session::which(&command.args, output, errors)?;
             Ok(CommandAction::Continue)
         }
         _ => {
@@ -103,7 +136,8 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        let action = dispatch(&command, None, &mut output, &mut errors, false).unwrap();
+        let action =
+            dispatch(&command, None, &mut output, &mut errors, false, None, false).unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -220,6 +254,53 @@ mod tests {
     #[test]
     fn an_unknown_name_is_reported_and_the_shell_keeps_going() {
         let (output, errors, action) = run(&["something"]);
+
+        assert!(output.is_empty());
+        assert_eq!(errors, "Command 'something' not found\n");
+        assert_eq!(action, CommandAction::Continue);
+    }
+
+    #[test]
+    fn help_prints_usage_instead_of_running_the_command() {
+        let temp = TempDir::new("dispatch_help");
+
+        let (output, errors, action) = run(&["rm", "--help"]);
+
+        assert!(
+            output.starts_with("Usage: rm [-r|-R] [-f] [-i] FILE...\n"),
+            "{output}"
+        );
+        assert!(errors.is_empty());
+        assert_eq!(action, CommandAction::Continue);
+
+        // A directory named as if it were an operand is left alone: `--help`
+        // took priority and nothing beyond it was ever read as one.
+        let untouched = temp.arg("kept");
+        fs::create_dir(&untouched).unwrap();
+        run(&["rm", "-r", &untouched, "--help"]);
+        assert!(fs::metadata(&untouched).unwrap().is_dir());
+    }
+
+    #[test]
+    fn help_takes_priority_over_an_invalid_option() {
+        let (output, errors, _) = run(&["cp", "-z", "--help"]);
+
+        assert!(output.starts_with("Usage: cp "), "{output}");
+        assert!(errors.is_empty(), "an invalid flag never gets reported");
+    }
+
+    #[test]
+    fn help_still_leaves_exit_running() {
+        let (output, errors, action) = run(&["exit", "--help"]);
+
+        assert_eq!(output, "Usage: exit\nExit the shell.\n");
+        assert!(errors.is_empty());
+        assert_eq!(action, CommandAction::Continue, "the shell must not exit");
+    }
+
+    #[test]
+    fn an_unknown_name_gets_no_help_text_either() {
+        let (output, errors, action) = run(&["something", "--help"]);
 
         assert!(output.is_empty());
         assert_eq!(errors, "Command 'something' not found\n");

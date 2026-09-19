@@ -93,12 +93,55 @@ where
     output.flush()
 }
 
+/// Reports what each name resolves to, the way bash's own `type` builtin
+/// does for one of its builtins.
+///
+/// This shell never runs an external program, so there is nothing beyond its
+/// own command table to check a name against: it is one of these commands or
+/// it is nothing at all. With no operands there is nothing to report and
+/// nothing is printed, which is what `type` alone does in bash too.
+pub fn type_of<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    for name in args {
+        if super::COMMAND_NAMES.contains(&name.as_str()) {
+            writeln!(output, "{name} is a shell builtin")?;
+        } else {
+            report::message("type", &format!("{name}: not found"), errors)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reports whether each name is one of this shell's own commands.
+///
+/// The real `which` searches `$PATH` for an executable and prints where it
+/// lives. This shell runs no external program and has no `$PATH` to search,
+/// so there is no path to print; what it can still say is whether the name
+/// is one it answers to at all.
+pub fn which<W, E>(args: &[String], output: &mut W, errors: &mut E) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    for name in args {
+        if super::COMMAND_NAMES.contains(&name.as_str()) {
+            writeln!(output, "{name}: shell builtin")?;
+        } else {
+            report::message("which", &format!("no {name} in this shell"), errors)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
     use std::os::unix::ffi::OsStrExt;
 
-    use super::{change_directory, clear, echo, exit, pwd};
+    use super::{change_directory, clear, echo, exit, pwd, type_of, which};
     use crate::commands::CommandAction;
     use crate::testing::WorkingDirectory;
 
@@ -211,6 +254,50 @@ mod tests {
         clear(&["extra".to_string()], &mut output).unwrap();
 
         assert_eq!(output, b"\x1b[H\x1b[2J\x1b[3J");
+    }
+
+    #[test]
+    fn type_reports_a_builtin_and_an_unknown_name() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let args = vec!["ls".to_string(), "nope".to_string()];
+
+        type_of(&args, &mut output, &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "ls is a shell builtin\n"
+        );
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "type: nope: not found\n"
+        );
+    }
+
+    #[test]
+    fn type_says_nothing_without_operands() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        type_of(&[], &mut output, &mut errors).unwrap();
+
+        assert!(output.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn which_reports_a_builtin_and_an_unknown_name() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let args = vec!["cp".to_string(), "nope".to_string()];
+
+        which(&args, &mut output, &mut errors).unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), "cp: shell builtin\n");
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "which: no nope in this shell\n"
+        );
     }
 
     #[test]
