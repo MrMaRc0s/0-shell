@@ -1,7 +1,8 @@
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, BufRead, ErrorKind, Write};
 use std::path::Path;
 
+use super::confirm::Confirm;
 use super::options::{self, Invalid};
 use super::transfer::{self, MV};
 use super::{cp, rm};
@@ -19,6 +20,12 @@ use crate::signal;
 /// `mv` parts company with `cp` and `rm`: a rename moves a whole tree in one
 /// step, so there is nothing for `-r` to switch on.
 ///
+/// `-i` asks before a move would overwrite an existing destination, the one
+/// case `mv` can silently clobber something in. The answer is read the same
+/// way `rm -i` reads one: from this command's own standard input, whether
+/// that is a file the shell redirected with `<` or a person at the terminal;
+/// a piped run with neither answers every question no.
+///
 /// A rename cannot cross a filesystem boundary. When the kernel refuses for
 /// that reason the move falls back to a recursive copy followed by removing the
 /// source, running the same code `cp -r` and `rm -r` do. The source is removed
@@ -26,19 +33,25 @@ use crate::signal;
 /// leaves the original where it is.
 ///
 /// One failing operand is reported and the rest are still moved.
-pub fn mv<E>(args: &[String], errors: &mut E) -> io::Result<()>
+pub fn mv<E>(
+    args: &[String],
+    input: Option<&mut dyn BufRead>,
+    interactive_terminal: bool,
+    errors: &mut E,
+) -> io::Result<()>
 where
     E: Write,
 {
-    // `mv` accepts no flags, but the operands still go through the option
-    // parser: `-x` has to be refused as an option rather than silently taken
-    // for a filename, and `--` has to keep working for a file whose name really
-    // does begin with a dash.
-    let parsed = match options::parse(args, "") {
+    // `-i` is the one flag `mv` accepts; the operands still go through the
+    // option parser otherwise so that `-x` is refused as an option rather
+    // than silently taken for a filename, and `--` keeps working for a file
+    // whose name really does begin with a dash.
+    let parsed = match options::parse(args, "i") {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("mv", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("mv", &option, errors),
     };
+    let interactive = parsed.has('i');
 
     let (destination, sources) = match parsed.operands.split_last() {
         None => return report::missing_file_operand("mv", errors),
@@ -50,6 +63,22 @@ where
     if sources.len() > 1 && !into_directory {
         return transfer::report_bad_target(MV, destination, errors);
     }
+
+    let stdin = io::stdin();
+    // Only the terminal branch below ever fills this in; the `None` it
+    // starts as is what keeps it alive long enough to be borrowed from that
+    // one arm, not a value meant to be read on its own.
+    #[allow(unused_assignments)]
+    let mut stdin_lock = None;
+    let mut confirm = match (interactive, input) {
+        (false, _) => Confirm::Unprompted,
+        (true, Some(reader)) => Confirm::Asked(reader),
+        (true, None) if interactive_terminal => {
+            stdin_lock = Some(stdin.lock());
+            Confirm::Asked(stdin_lock.as_mut().unwrap())
+        }
+        (true, None) => Confirm::Unavailable,
+    };
 
     for source in sources {
         // A Ctrl+C stops the move at the next operand, so the sources after it
@@ -65,14 +94,19 @@ where
             continue;
         };
 
-        move_one(source, &target, errors)?;
+        move_one(source, &target, &mut confirm, errors)?;
     }
 
     Ok(())
 }
 
 /// Moves one source to one fully resolved target path.
-fn move_one<E>(source: &Path, target: &Path, errors: &mut E) -> io::Result<()>
+fn move_one<E>(
+    source: &Path,
+    target: &Path,
+    confirm: &mut Confirm,
+    errors: &mut E,
+) -> io::Result<()>
 where
     E: Write,
 {
@@ -136,6 +170,17 @@ where
         return report::message("mv", &text, errors);
     }
 
+    // The only thing `-i` asks about: whether it is fine to clobber whatever
+    // is already sitting at the target. A target that does not exist is
+    // nothing to ask about, and `Confirm::Unprompted` skips the question
+    // itself when `-i` was never given.
+    if target.symlink_metadata().is_ok() {
+        let prompt = format!("mv: overwrite {}? ", report::quoted(target));
+        if !confirm.ask(&prompt, errors)? {
+            return Ok(());
+        }
+    }
+
     match fs::rename(source, target) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::CrossesDevices => {
@@ -157,17 +202,18 @@ where
 /// `rename` edits directory entries and cannot span mount points, so a move
 /// onto a different filesystem has to be done the long way. Both halves are the
 /// code `cp -r` and `rm -r` already run, told to name themselves `mv` so the
-/// messages read as the command the user typed.
+/// messages read as the command the user typed. Neither one asks `-i`'s
+/// question again: it already had its answer above, before the copy started.
 fn move_across_filesystems<E>(source: &Path, target: &Path, errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
     // Always recursive: `mv` moves a directory without being asked twice, and a
     // recursive copy is also the one that recreates a symlink rather than
-    // duplicating the file it points at.
-    // `mv` has no `-p` of its own to pass on. A rename preserves every
-    // attribute for free, and the fallback below is standing in for exactly
-    // that, so it carries times over the same way a rename would.
+    // duplicating the file it points at. `mv` has no `-p` of its own to pass
+    // on either, but a rename preserves every attribute for free, and this
+    // fallback is standing in for exactly that, so it carries timestamps over
+    // the same way a rename would.
     if !cp::copy(MV, source, target, true, true, errors)? {
         // The copy said why it stopped. Whatever reached the target stays
         // there, as it does under GNU `mv`, but the source is left alone: a
@@ -175,10 +221,10 @@ where
         return Ok(());
     }
 
-    // Removal is unforced, so a source that cannot be deleted is reported
-    // rather than passed over in silence. The copy that already landed is not
-    // rolled back.
-    rm::remove("mv", source, true, false, errors)?;
+    // Removal is unforced and unprompted, so a source that cannot be deleted
+    // is reported rather than passed over in silence. The copy that already
+    // landed is not rolled back.
+    rm::remove("mv", source, true, false, &mut Confirm::Unprompted, errors)?;
 
     Ok(())
 }
@@ -186,6 +232,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Cursor;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
@@ -202,10 +249,13 @@ mod tests {
         path
     }
 
-    /// Runs `mv` and returns whatever it had to say.
+    /// Runs `mv` and returns whatever it had to say. No redirected input, and
+    /// not at a terminal either, so an `-i` in `operands` finds no source to
+    /// read an answer from; the `-i` tests below call `mv` directly instead,
+    /// to supply the answers they are checking.
     fn run(operands: &[String]) -> String {
         let mut errors = Vec::new();
-        mv(operands, &mut errors).unwrap();
+        mv(operands, None, false, &mut errors).unwrap();
         String::from_utf8(errors).unwrap()
     }
 
@@ -573,5 +623,84 @@ mod tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"dashed\n");
         assert!(errors.is_empty(), "{errors}");
+    }
+
+    #[test]
+    fn interactive_says_nothing_about_a_target_that_does_not_exist() {
+        let temp = TempDir::new("mv_i_new");
+        let source = write(&temp, "source.txt", b"moved\n");
+        let target = temp.arg("target.txt");
+        let mut input = Cursor::new(Vec::new());
+        let mut errors = Vec::new();
+
+        mv(
+            &args(&["-i", &source, &target]),
+            Some(&mut input),
+            false,
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"moved\n");
+        assert!(errors.is_empty(), "nothing to overwrite, nothing to ask");
+    }
+
+    #[test]
+    fn interactive_overwrites_when_the_answer_agrees() {
+        let temp = TempDir::new("mv_i_yes");
+        let source = write(&temp, "source.txt", b"new\n");
+        let target = write(&temp, "target.txt", b"old\n");
+        let mut input = Cursor::new(b"y\n".to_vec());
+        let mut errors = Vec::new();
+
+        mv(
+            &args(&["-i", &source, &target]),
+            Some(&mut input),
+            false,
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new\n");
+        assert!(fs::symlink_metadata(&source).is_err(), "source survived");
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            format!("mv: overwrite '{target}'? ")
+        );
+    }
+
+    #[test]
+    fn interactive_leaves_both_files_alone_when_the_answer_declines() {
+        let temp = TempDir::new("mv_i_no");
+        let source = write(&temp, "source.txt", b"new\n");
+        let target = write(&temp, "target.txt", b"old\n");
+        let mut input = Cursor::new(b"n\n".to_vec());
+        let mut errors = Vec::new();
+
+        mv(
+            &args(&["-i", &source, &target]),
+            Some(&mut input),
+            false,
+            &mut errors,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"old\n", "target overwritten");
+        assert_eq!(fs::read(&source).unwrap(), b"new\n", "source lost");
+    }
+
+    #[test]
+    fn interactive_without_a_source_to_ask_declines_without_prompting() {
+        let temp = TempDir::new("mv_i_unavailable");
+        let source = write(&temp, "source.txt", b"new\n");
+        let target = write(&temp, "target.txt", b"old\n");
+        let mut errors = Vec::new();
+
+        // No redirected input, and not at a terminal either: the situation a
+        // piped, non-interactive run with `-i` is actually in.
+        mv(&args(&["-i", &source, &target]), None, false, &mut errors).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"old\n", "target overwritten");
+        assert!(errors.is_empty(), "nothing to ask, so nothing is printed");
     }
 }

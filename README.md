@@ -35,8 +35,8 @@ The implementation order and two-developer work split are recorded in
 | `mkdir` | `-p` | One or more directories. `-p` creates each operand's missing parents in one go and passes over a directory that already exists; without it each parent has to exist already. |
 | `cat`   | none | One or more files, streamed as raw bytes, or a redirected file read as standard input. |
 | `cp`    | `-r`, `-R`, `-p` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. Permission bits are always carried over; `-p` additionally carries over the access and modification times. Owner and group are not: that needs `chown`, which has no standard library binding, and without root the kernel would only refuse it. |
-| `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
-| `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
+| `mv`    | `-i` | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. `-i` asks before overwriting an existing destination. |
+| `rm`    | `-r`, `-R`, `-f`, `-i` | Refuses a directory without `-r`. `-i` asks before every removal, file by file even inside a recursive tree; `-f` silences it. |
 | `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 | `type`  | none | Says whether each name is one of this shell's own commands, the way bash's builtin does for one of its. With no operand it says nothing, which is also what bash does. |
@@ -61,6 +61,14 @@ cannot be opened stops only its command —
 `cat` reads a redirected file as standard input, and labels a read error on it
 `cat: (standard input)`. `>>`, `>`, and `<` are recognised only outside quotes,
 so a file name can genuinely contain them.
+
+`rm -i` and `mv -i` read their yes-or-no answers the same way: from a file
+redirected with `<` when there is one, from the terminal itself when a person
+is sitting at one, and, lacking both — a piped, non-interactive run with no
+redirection of its own — from nowhere at all. That last case answers every
+question no rather than blocking on a standard input the shell's own script
+reader already owns, the same answer GNU gives a prompt that runs into end of
+input instead of a line.
 
 On a real terminal, `ls` also colours its output the way GNU's `--color=auto`
 does: directories in bold blue, executables in bold green, FIFOs in yellow,

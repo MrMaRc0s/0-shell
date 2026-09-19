@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufReader, IsTerminal, Write};
 
 use crate::commands::report;
 use crate::commands::{CommandAction, dispatch};
@@ -71,7 +71,7 @@ pub fn run() -> io::Result<()> {
     if let Some(mut terminal) = Terminal::new() {
         let stdout = io::stdout();
         let mut output = LastByte::new(stdout.lock());
-        return run_loop(&mut terminal, &mut output, &mut errors, colored);
+        return run_loop(&mut terminal, &mut output, &mut errors, colored, true);
     }
 
     let stdin = io::stdin();
@@ -79,18 +79,23 @@ pub fn run() -> io::Result<()> {
     let stdout = io::stdout();
     let mut output = LastByte::new(stdout.lock());
 
-    run_loop(&mut piped, &mut output, &mut errors, colored)
+    run_loop(&mut piped, &mut output, &mut errors, colored, false)
 }
 
 /// The read, parse, dispatch loop, whatever the lines are coming from.
 ///
 /// `colored` is whether standard output is a terminal. It lets `ls` match the
 /// host tool, which also colors names only when it is writing to a person.
+/// `interactive_terminal` is the same question asked of standard input: it
+/// lets `rm -i` and `mv -i` know a person is there to read an unredirected
+/// question from, rather than the shell's own script reader owning the only
+/// standard input there is.
 fn run_loop<S, W, E>(
     source: &mut S,
     output: &mut LastByte<W>,
     errors: &mut E,
     colored: bool,
+    interactive_terminal: bool,
 ) -> io::Result<()>
 where
     S: LineSource,
@@ -152,14 +157,26 @@ where
                         // shell is.
                         let colored = colored && output_file.is_none();
 
-                        let mut input = input_file;
-                        let input = input.as_mut().map(|file| file as &mut dyn Read);
+                        let mut input = input_file.map(BufReader::new);
+                        let input = input.as_mut().map(|file| file as &mut dyn io::BufRead);
 
                         let action = match output_file {
-                            Some(mut file) => {
-                                dispatch(&command, input, &mut file, errors, colored)?
-                            }
-                            None => dispatch(&command, input, output, errors, colored)?,
+                            Some(mut file) => dispatch(
+                                &command,
+                                input,
+                                &mut file,
+                                errors,
+                                colored,
+                                interactive_terminal,
+                            )?,
+                            None => dispatch(
+                                &command,
+                                input,
+                                output,
+                                errors,
+                                colored,
+                                interactive_terminal,
+                            )?,
                         };
 
                         // A Ctrl+C that reached a command's own loops is left
@@ -271,7 +288,7 @@ where
     let mut piped = PipedLines::new(input);
     let mut output = LastByte::new(output);
 
-    run_loop(&mut piped, &mut output, errors, false)
+    run_loop(&mut piped, &mut output, errors, false, false)
 }
 
 #[cfg(test)]
@@ -347,6 +364,7 @@ mod tests {
             &mut LastByte::new(&mut output),
             &mut errors,
             false,
+            false,
         )
         .unwrap();
 
@@ -376,6 +394,7 @@ mod tests {
             &mut Plain,
             &mut LastByte::new(&mut output),
             &mut errors,
+            false,
             false,
         )
         .unwrap();

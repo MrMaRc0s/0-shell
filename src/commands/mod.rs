@@ -2,7 +2,7 @@ mod filesystem;
 pub(crate) mod report;
 mod session;
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use crate::parser::ParsedCommand;
 
@@ -25,10 +25,11 @@ pub enum CommandAction {
 
 pub fn dispatch<W, E>(
     command: &ParsedCommand,
-    input: Option<&mut dyn Read>,
+    input: Option<&mut dyn BufRead>,
     output: &mut W,
     errors: &mut E,
     colored: bool,
+    interactive_terminal: bool,
 ) -> io::Result<CommandAction>
 where
     W: Write,
@@ -57,6 +58,9 @@ where
             Ok(CommandAction::Continue)
         }
         "cat" => {
+            // `cat` only ever reads, so a `dyn BufRead` serves it exactly as
+            // a `dyn Read` would; the supertrait coercion needs stating.
+            let input = input.map(|reader| reader as &mut dyn Read);
             filesystem::cat(&command.args, input, output, errors)?;
             Ok(CommandAction::Continue)
         }
@@ -65,11 +69,11 @@ where
             Ok(CommandAction::Continue)
         }
         "mv" => {
-            filesystem::mv(&command.args, errors)?;
+            filesystem::mv(&command.args, input, interactive_terminal, errors)?;
             Ok(CommandAction::Continue)
         }
         "rm" => {
-            filesystem::rm(&command.args, errors)?;
+            filesystem::rm(&command.args, input, interactive_terminal, errors)?;
             Ok(CommandAction::Continue)
         }
         "ls" => {
@@ -112,7 +116,7 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        let action = dispatch(&command, None, &mut output, &mut errors, false).unwrap();
+        let action = dispatch(&command, None, &mut output, &mut errors, false, false).unwrap();
 
         (
             String::from_utf8(output).unwrap(),

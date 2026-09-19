@@ -60,6 +60,15 @@
 //! * `cp: omitting special file '<src>'` (a device, FIFO, or socket)
 //! * `mv: cannot move '<src>' to a subdirectory of itself, '<dst>'`
 //!
+//! `-i`'s prompts are fixed wording too, written without a trailing newline
+//! since an answer follows on the same line:
+//!
+//! * `rm: remove regular file '<path>'? ` (a plain file, `regular empty file`
+//!   when it has nothing in it)
+//! * `rm: remove symbolic link '<path>'? `
+//! * `rm: remove directory '<path>'? ` (once its contents are already gone)
+//! * `mv: overwrite '<dst>'? ` (only when the destination already exists)
+//!
 //! `cp` and `mv` share their transfer code, so they share these, each naming
 //! itself and its own verb (`copy` or `move`):
 //!
@@ -97,6 +106,7 @@
 //! `io::Error` directly with `{}`.
 
 mod cat;
+mod confirm;
 mod cp;
 mod ls;
 mod mkdir;
