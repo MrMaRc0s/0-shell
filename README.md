@@ -234,11 +234,22 @@ source resolves fewer names than the real `ls` would.
 
 Times are local, and the offset comes from the compiled zone file the system
 points at: `$TZ` when it names a zone, `/etc/localtime` otherwise. Daylight
-saving is honoured, since the file records every changeover. Two limits: a `TZ`
-holding rules rather than a zone name (`EET-2EEST,M3.5.0/3`) falls back to UTC,
-and a timestamp past the last changeover a zone file lists, which on this system
-is in 2037, keeps the last known offset instead of applying the file's trailing
-rule.
+saving is honoured, since the file records every changeover.
+
+A `TZ` holding rules rather than a zone name, `EET-2EEST,M3.5.0/3,M10.5.0/4`,
+is read as a self-contained rule once a file by that name fails to turn up —
+that string is not a path under `/usr/share/zoneinfo` any zone file lives at.
+The same reader also handles what a zone file itself carries past the last
+changeover it bothered to record, which on this system is some time in 2037:
+every such file from format version 2 onward appends its own trailing rule, a
+line just like `TZ` itself can hold, meant to be applied from there on.
+`src/commands/filesystem/ls/time/posix.rs` reads the common shape both take —
+a month, a week within it, and a day of the week, `Mmonth.week.day` — which is
+the only shape a zone file on this system actually uses. The rarer Julian-day
+forms POSIX also allows are left unparsed rather than taken on faith, and fall
+back to whatever the caller already did without a rule at all: UTC for a `TZ`
+naming one directly, the last known offset for a timestamp past a zone file's
+final changeover.
 
 A symbolic link named directly, with its target gone, is reported missing:
 `ls: cannot access 'name': No such file or directory`, the same wording a
