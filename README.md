@@ -61,6 +61,26 @@ Anything else is reported as `Command 'name' not found`, and the shell carries
 on. No command aborts the shell, and a failing operand never stops the ones
 after it: `rm present missing other` removes both `present` and `other`.
 
+## Chaining and piping
+
+`;` runs several commands from one line, one after another, whether or not an
+earlier one succeeded: `mkdir a ; cd a ; pwd` changes directory and prints it
+even if `a` already existed. `|` connects one command's output to the next
+command's input — `ls -l | cat`, `cat file | cat` — with no process, and so no
+real pipe, on the other end of it: this shell captures a stage's whole output
+before the next stage ever reads any of it, which is invisible except to a
+command that would otherwise have started producing output before its input
+was ready. `;` and `|` combine on one line (`ls | cat ; echo done`), and both
+are recognised only outside quotes. A command's own `<` or `>`/`>>` always
+wins over the pipe either side of it: `cat < in.txt | cat > out.txt` reads
+`in.txt`, not the empty pipe from nothing before it, and writes `out.txt`, not
+the pipe to nothing after it. Exactly one command's line — the last stage of
+the last pipeline that has no redirection of its own — reaches the terminal
+and is ever coloured; every other stage's output is captured, the same as it
+would be with a real pipe. `exit` anywhere on the line stops it immediately,
+same as it always has: `echo before ; exit ; echo after` never reaches the
+second `echo`.
+
 ## Redirecting input and output
 
 `>` writes a command's output to a file, creating or emptying it; `>>` appends

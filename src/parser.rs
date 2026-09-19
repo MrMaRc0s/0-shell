@@ -184,6 +184,84 @@ pub fn parse(input: &str) -> Result<Option<ParsedCommand>, ParseError> {
     }))
 }
 
+/// Parses a whole line into the sequence of pipelines it runs, in the order
+/// they run: `;` separates one pipeline from the next, and `|` within a
+/// pipeline connects one command's output to the next command's input. A
+/// pipeline of one command, with no `|` at all, is the ordinary case every
+/// caller had before pipelines existed.
+///
+/// Every command on the line is parsed before any of it is treated as ready
+/// to run, the same way a real shell reads a whole line's grammar first: one
+/// bad command aborts the line without running any of the commands before it.
+/// An empty pipeline — the gap in `echo one ;; echo two`, or a blank line —
+/// contributes an empty `Vec`, which the caller skips over doing nothing, the
+/// same way a blank line already did nothing.
+pub fn parse_line(line: &str) -> Result<Vec<Vec<ParsedCommand>>, ParseError> {
+    let mut sequence = Vec::new();
+
+    for segment in split_unquoted(line, ';') {
+        let mut pipeline = Vec::new();
+        for stage in split_unquoted(&segment, '|') {
+            if let Some(command) = parse(&stage)? {
+                pipeline.push(command);
+            }
+        }
+        sequence.push(pipeline);
+    }
+
+    Ok(sequence)
+}
+
+/// Splits `line` on every top-level `separator`, leaving one inside quotes or
+/// right after a backslash as ordinary text instead — the same quoting rules
+/// [`parse`] applies to `>`, `<`, and whitespace, kept just enough of here to
+/// know where one command ends and the next begins, and left for `parse`
+/// itself to interpret once each piece is its own command.
+fn split_unquoted(line: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = Quote::None;
+    let mut escaped = false;
+
+    for character in line.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+
+        match (quote, character) {
+            (Quote::None | Quote::Double, '\\') => {
+                escaped = true;
+                current.push(character);
+            }
+            (Quote::None, '\'') => {
+                quote = Quote::Single;
+                current.push(character);
+            }
+            (Quote::Single, '\'') => {
+                quote = Quote::None;
+                current.push(character);
+            }
+            (Quote::None, '"') => {
+                quote = Quote::Double;
+                current.push(character);
+            }
+            (Quote::Double, '"') => {
+                quote = Quote::None;
+                current.push(character);
+            }
+            (Quote::None, character) if character == separator => {
+                parts.push(std::mem::take(&mut current));
+            }
+            (_, character) => current.push(character),
+        }
+    }
+    parts.push(current);
+
+    parts
+}
+
 /// Hands the word being built to its owner: the command's arguments, or the
 /// path a redirection is waiting for.
 fn take_word(
@@ -248,6 +326,8 @@ fn read_variable_name(characters: &mut Peekable<Chars>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::env;
+
+    use super::parse_line;
 
     use super::{Direction, ParseError, ParsedCommand, Redirection, parse};
 
@@ -477,6 +557,98 @@ mod tests {
                     path: "empty".to_string(),
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn a_line_with_neither_separator_is_one_pipeline_of_one_command() {
+        assert_eq!(
+            parse_line("echo hi").unwrap(),
+            vec![vec![command("echo", &["hi"])]]
+        );
+    }
+
+    #[test]
+    fn semicolons_separate_pipelines_run_one_after_another() {
+        assert_eq!(
+            parse_line("echo one; echo two ;echo three").unwrap(),
+            vec![
+                vec![command("echo", &["one"])],
+                vec![command("echo", &["two"])],
+                vec![command("echo", &["three"])],
+            ]
+        );
+    }
+
+    #[test]
+    fn pipes_connect_the_commands_of_one_pipeline() {
+        assert_eq!(
+            parse_line("ls -a | cat").unwrap(),
+            vec![vec![command("ls", &["-a"]), command("cat", &[]),]]
+        );
+    }
+
+    #[test]
+    fn semicolons_and_pipes_combine() {
+        assert_eq!(
+            parse_line("ls | cat ; echo done").unwrap(),
+            vec![
+                vec![command("ls", &[]), command("cat", &[])],
+                vec![command("echo", &["done"])],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gap_between_separators_is_an_empty_pipeline() {
+        assert_eq!(
+            parse_line("echo one ;; echo two").unwrap(),
+            vec![
+                vec![command("echo", &["one"])],
+                vec![],
+                vec![command("echo", &["two"])],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_semicolon_or_pipe_inside_quotes_is_literal_text() {
+        assert_eq!(
+            parse_line("echo 'a;b' \"c|d\"").unwrap(),
+            vec![vec![command("echo", &["a;b", "c|d"])]]
+        );
+    }
+
+    #[test]
+    fn a_bad_command_anywhere_on_the_line_fails_the_whole_line() {
+        assert_eq!(
+            parse_line("echo one | 'unclosed"),
+            Err(ParseError::UnclosedSingleQuote)
+        );
+    }
+
+    #[test]
+    fn a_redirection_stays_with_the_pipeline_stage_that_named_it() {
+        assert_eq!(
+            parse_line("cat < in.txt | grep hi > out.txt").unwrap(),
+            vec![vec![
+                ParsedCommand {
+                    name: "cat".to_string(),
+                    args: vec![],
+                    redirections: vec![Redirection {
+                        direction: Direction::Read,
+                        path: "in.txt".to_string(),
+                    }],
+                },
+                ParsedCommand {
+                    name: "grep".to_string(),
+                    args: vec!["hi".to_string()],
+                    redirections: vec![Redirection {
+                        direction: Direction::Truncate,
+                        path: "out.txt".to_string(),
+                    }],
+                },
+            ]]
         );
     }
 }

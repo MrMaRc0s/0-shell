@@ -1,10 +1,10 @@
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, IsTerminal, Write};
+use std::io::{self, BufReader, Cursor, IsTerminal, Write};
 
 use crate::commands::report;
 use crate::commands::{CommandAction, dispatch};
-use crate::parser::{Direction, ParsedCommand, parse};
+use crate::parser::{Direction, ParsedCommand, parse_line};
 use crate::signal;
 use crate::terminal::{self, Line, LineSource, PipedLines, Terminal};
 
@@ -147,77 +147,166 @@ where
                 // A Ctrl+C from the previous command is stale before this one
                 // starts, and must not be allowed to stop it. The flag is
                 // cleared once here rather than per stream, and whatever the
-                // command does with it is settled after dispatch.
+                // command does with it is settled after the whole line runs.
                 signal::reset();
 
-                match parse(&line) {
-                    Ok(Some(command)) => {
-                        // The output and input files are opened before the
-                        // command runs, because a redirection that cannot be
-                        // opened has to stop the command rather than run it
-                        // against nothing.
-                        let (output_file, input_file) = match open_redirections(&command) {
-                            Ok(redirects) => redirects,
-                            Err(redirect) => {
-                                writeln!(errors, "0-shell: {}", redirect.message())?;
+                match parse_line(&line) {
+                    Ok(sequence) => {
+                        let mut exit_requested = false;
+
+                        // `;` runs each pipeline in turn; an empty one — a
+                        // blank line, or the gap in `echo one ;; echo two` —
+                        // has nothing in it to run and is skipped.
+                        for pipeline in sequence {
+                            if pipeline.is_empty() {
                                 continue;
                             }
-                        };
 
-                        // A redirection with no command at all (`> file`) still
-                        // performs the redirection, as POSIX requires: the file
-                        // was opened above and is now dropped. There is nothing
-                        // to run.
-                        if command.name.is_empty() {
-                            continue;
-                        }
-
-                        // The colour decision belongs to this command's stream:
-                        // a `> file` redirect sends it to a file, and files
-                        // never get colors, whatever the terminal behind the
-                        // shell is.
-                        let colored = colored && output_file.is_none();
-
-                        let mut input = input_file.map(BufReader::new);
-                        let input = input.as_mut().map(|file| file as &mut dyn io::BufRead);
-
-                        let action = match output_file {
-                            Some(mut file) => dispatch(
-                                &command,
-                                input,
-                                &mut file,
-                                errors,
-                                colored,
-                                width,
-                                interactive_terminal,
-                            )?,
-                            None => dispatch(
-                                &command,
-                                input,
+                            let action = run_pipeline(
+                                &pipeline,
                                 output,
                                 errors,
                                 colored,
                                 width,
                                 interactive_terminal,
-                            )?,
-                        };
+                            )?;
+
+                            if action == CommandAction::Exit {
+                                exit_requested = true;
+                                break;
+                            }
+                        }
 
                         // A Ctrl+C that reached a command's own loops is left
                         // standing here so it is not carried into the next
-                        // line. Commands read the flag without consuming it, so
-                        // this is the one place the signal is put to rest.
+                        // line. Commands read the flag without consuming it,
+                        // so this is the one place the signal is put to rest.
                         signal::take();
 
-                        if action == CommandAction::Exit {
+                        if exit_requested {
                             return Ok(());
                         }
                     }
-                    Ok(None) => {}
                     Err(error) => writeln!(errors, "0-shell: {error}")?,
                 }
             }
         }
     }
+}
+
+/// Runs one `|`-connected pipeline, feeding each stage's captured output to
+/// the next stage's input in memory. There is no real pipe here, since a real
+/// one needs a second process to be its other end and this shell launches
+/// none; capturing the whole of one command's output before the next reads
+/// any of it is the cost of that, same as it would be for one command's `>`
+/// redirection feeding a later command's `<`.
+///
+/// A stage's own `<` or `>`/`>>` redirection always wins over the pipe: it is
+/// what the line named by hand, and silently overriding it with the
+/// neighbouring stage would be the more surprising choice. Only the last
+/// stage's *unredirected* output reaches the shell's real `output` — and only
+/// it is ever coloured — exactly as only the last stage of a real pipe writes
+/// to the terminal.
+fn run_pipeline<W, E>(
+    stages: &[ParsedCommand],
+    output: &mut LastByte<W>,
+    errors: &mut E,
+    colored: bool,
+    width: Option<usize>,
+    interactive_terminal: bool,
+) -> io::Result<CommandAction>
+where
+    W: Write,
+    E: Write,
+{
+    let mut carried_input: Option<Vec<u8>> = None;
+
+    for (index, command) in stages.iter().enumerate() {
+        let is_last = index + 1 == stages.len();
+
+        // The output and input files are opened before the command runs,
+        // because a redirection that cannot be opened has to stop the
+        // command rather than run it against nothing.
+        let (output_file, input_file) = match open_redirections(command) {
+            Ok(redirects) => redirects,
+            Err(redirect) => {
+                writeln!(errors, "0-shell: {}", redirect.message())?;
+                return Ok(CommandAction::Continue);
+            }
+        };
+
+        // A redirection with no command at all (`> file`) still performs the
+        // redirection, as POSIX requires: the file was opened above and is
+        // now dropped. There is nothing to run, and nothing to carry on to
+        // whatever stage comes next.
+        if command.name.is_empty() {
+            carried_input = None;
+            continue;
+        }
+
+        let mut file_reader = input_file.map(BufReader::new);
+        let mut buffer_reader = None;
+        if file_reader.is_some() {
+            carried_input = None;
+        } else if let Some(bytes) = carried_input.take() {
+            buffer_reader = Some(Cursor::new(bytes));
+        }
+
+        let input: Option<&mut dyn io::BufRead> = if let Some(reader) = file_reader.as_mut() {
+            Some(reader)
+        } else {
+            buffer_reader
+                .as_mut()
+                .map(|reader| reader as &mut dyn io::BufRead)
+        };
+
+        let stage_colored = colored && is_last && output_file.is_none();
+
+        let action = match output_file {
+            Some(mut file) => {
+                let action = dispatch(
+                    command,
+                    input,
+                    &mut file,
+                    errors,
+                    false,
+                    None,
+                    interactive_terminal,
+                )?;
+                carried_input = None;
+                action
+            }
+            None if is_last => dispatch(
+                command,
+                input,
+                output,
+                errors,
+                stage_colored,
+                width,
+                interactive_terminal,
+            )?,
+            None => {
+                let mut captured = Vec::new();
+                let action = dispatch(
+                    command,
+                    input,
+                    &mut captured,
+                    errors,
+                    stage_colored,
+                    width,
+                    interactive_terminal,
+                )?;
+                carried_input = Some(captured);
+                action
+            }
+        };
+
+        if action == CommandAction::Exit {
+            return Ok(CommandAction::Exit);
+        }
+    }
+
+    Ok(CommandAction::Continue)
 }
 
 /// A redirection that could not be opened.
@@ -668,5 +757,99 @@ mod tests {
         assert!(errors.is_empty(), "{errors}");
         assert!(fs::read("first").unwrap().is_empty());
         assert_eq!(fs::read("final").unwrap(), b"only\n");
+    }
+
+    #[test]
+    fn semicolons_run_each_command_in_turn() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo one ; echo two\n");
+
+        assert_eq!(output, format!("{prompt}one\ntwo\n{prompt}\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_failing_command_does_not_stop_the_rest_of_the_sequence() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("nope ; echo still-runs\n");
+
+        assert_eq!(output, format!("{prompt}still-runs\n{prompt}\n"));
+        assert_eq!(errors, "Command 'nope' not found\n");
+    }
+
+    #[test]
+    fn exit_inside_a_sequence_stops_the_remaining_pipelines() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo before ; exit ; echo after\n");
+
+        assert_eq!(output, format!("{prompt}before\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_pipe_feeds_one_commands_output_to_the_next_commands_input() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo hi | cat\n");
+
+        assert_eq!(output, format!("{prompt}hi\n{prompt}\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_pipeline_of_three_stages_carries_the_output_through_the_middle_one() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo hi | cat | cat\n");
+
+        assert_eq!(output, format!("{prompt}hi\n{prompt}\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_command_that_never_reads_its_input_still_lets_the_pipeline_finish() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo a | nope | echo b\n");
+
+        assert_eq!(output, format!("{prompt}b\n{prompt}\n"));
+        assert_eq!(errors, "Command 'nope' not found\n");
+    }
+
+    #[test]
+    fn redirection_and_piping_combine_in_one_line() {
+        let temp = TempDir::new("shell_pipe_redirect");
+        let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
+
+        let (output, errors) = script("echo hi > note.txt ; cat < note.txt | cat\n");
+
+        assert_eq!(output, format!("{prompt}hi\n{prompt}\n"));
+        assert!(errors.is_empty(), "{errors}");
+    }
+
+    #[test]
+    fn a_stages_own_redirection_wins_over_the_pipe_that_feeds_it() {
+        let temp = TempDir::new("shell_pipe_redirect_wins");
+        let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
+
+        fs::write("real.txt", b"real\n").unwrap();
+
+        // `cat`'s own `< real.txt` overrides whatever `echo piped` would have
+        // sent it through the pipe.
+        let (output, errors) = script("echo piped | cat < real.txt\n");
+
+        assert_eq!(output, format!("{prompt}real\n{prompt}\n"));
+        assert!(errors.is_empty(), "{errors}");
     }
 }
