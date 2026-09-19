@@ -147,3 +147,11 @@ impl LineSource for Terminal {
         true
     }
 }
+
+/// Standard output's width in columns, or `None` when it is not a real
+/// terminal or this system has no way to ask one for its size. `ls` reads
+/// this to decide whether to arrange its short format into columns, the way
+/// GNU's own does only ever on a real terminal.
+pub fn width() -> Option<usize> {
+    raw::terminal_width(&io::stdout())
+}

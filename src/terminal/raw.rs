@@ -53,6 +53,18 @@ const TCSETS: usize = 0x5402; // `asm-generic/ioctls.h`
 ))]
 const TCSETS: usize = 0x8048_7414; // `TIOCSETA`, `sys/ttycom.h`
 
+/// The ioctl that reads the terminal's size, in rows and columns.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TIOCGWINSZ: usize = 0x5413; // `asm-generic/ioctls.h`
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const TIOCGWINSZ: usize = 0x4008_7468; // `sys/ttycom.h`
+
 /// `SYS_ioctl`, which differs per system and architecture.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SYS_IOCTL: usize = 16;
@@ -142,6 +154,19 @@ struct Termios {
     control_characters: [u8; 20],
     ispeed: u64,
     ospeed: u64,
+}
+
+/// The kernel's `struct winsize`, as `TIOCGWINSZ` fills it in: four 16-bit
+/// fields, rows and columns first, then a pixel size neither system fills in
+/// over a real terminal and this module has no use for. Linux and macOS
+/// agree on this one, unlike `termios` above.
+#[repr(C)]
+#[derive(Default)]
+struct WindowSize {
+    rows: u16,
+    columns: u16,
+    _x_pixels: u16,
+    _y_pixels: u16,
 }
 
 /// Issues a three-argument system call.
@@ -280,8 +305,41 @@ fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
     checked(result)
 }
 
-/// On a system or architecture without a syscall stub here, raw mode is
-/// unavailable.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn window_size(fd: RawFd) -> io::Result<WindowSize> {
+    let mut size = WindowSize::default();
+
+    // SAFETY: as `get_settings`, above: `TIOCGWINSZ` expects a `struct
+    // winsize` to write into, and `size` is exactly that, owned here and
+    // pointed to for the duration of the call.
+    let result = unsafe {
+        syscall3(
+            SYS_IOCTL,
+            fd as usize,
+            TIOCGWINSZ,
+            std::ptr::from_mut(&mut size) as usize,
+        )
+    };
+
+    checked(result).map(|()| size)
+}
+
+/// The terminal's width in columns, or `None` when `fd` is not a real
+/// terminal, this system has no ioctl stub here, or the kernel answered with
+/// a width of zero, which some do over a terminal with no controlling size.
+pub fn terminal_width<F>(terminal: &F) -> Option<usize>
+where
+    F: AsRawFd,
+{
+    let size = window_size(terminal.as_raw_fd()).ok()?;
+    (size.columns > 0).then_some(size.columns as usize)
+}
+
+/// On a system or architecture without a syscall stub here, raw mode and the
+/// terminal size are both unavailable.
 ///
 /// Reporting "not a terminal" is the same answer a pipe gives, so the shell
 /// falls back to reading whole lines and every required behaviour is unchanged.
@@ -292,6 +350,17 @@ fn set_settings(fd: RawFd, settings: &Termios) -> io::Result<()> {
 )))]
 fn get_settings(_fd: RawFd) -> io::Result<Termios> {
     Err(io::Error::from_raw_os_error(25))
+}
+
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+pub fn terminal_width<F>(_terminal: &F) -> Option<usize>
+where
+    F: AsRawFd,
+{
+    None
 }
 
 #[cfg(not(all(
@@ -359,7 +428,7 @@ mod tests {
     use std::fs::File;
     use std::mem::{offset_of, size_of};
 
-    use super::{RawMode, TCGETS, TCSETS, Termios};
+    use super::{RawMode, TCGETS, TCSETS, TIOCGWINSZ, Termios, WindowSize, terminal_width};
 
     #[test]
     fn a_file_is_not_a_terminal_and_says_so() {
@@ -399,5 +468,21 @@ mod tests {
         {
             assert_eq!(size_of::<Termios>(), 36, "asm-generic termios");
         }
+    }
+
+    #[test]
+    fn the_window_size_layout_matches_the_ioctl_size() {
+        assert_eq!(size_of::<WindowSize>(), 8, "four u16 fields");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!((TIOCGWINSZ >> 16) & 0x3fff, size_of::<WindowSize>());
+    }
+
+    #[test]
+    fn a_file_has_no_width_to_report() {
+        let temp = crate::testing::TempDir::new("raw_no_width");
+        let file = File::create(temp.arg("regular")).unwrap();
+
+        assert_eq!(terminal_width(&file), None);
     }
 }

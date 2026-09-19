@@ -37,7 +37,7 @@ The implementation order and two-developer work split are recorded in
 | `cp`    | `-r`, `-R`, `-p` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. Permission bits are always carried over; `-p` additionally carries over the access and modification times. Owner and group are not: that needs `chown`, which has no standard library binding, and without root the kernel would only refuse it. |
 | `mv`    | `-i` | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. `-i` asks before overwriting an existing destination. |
 | `rm`    | `-r`, `-R`, `-f`, `-i` | Refuses a directory without `-r`. `-i` asks before every removal, file by file even inside a recursive tree; `-f` silences it. |
-| `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |
+| `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is, and the short format is arranged into columns; piped output stays plain and one name per line. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 | `type`  | none | Says whether each name is one of this shell's own commands, the way bash's builtin does for one of its. With no operand it says nothing, which is also what bash does. |
 | `which` | none | The same question `type` answers, in the wording the standalone `which` uses. There is no `$PATH` to search and so no path to print: this shell runs no external program, and the honest answer is only ever "one of mine" or "not mine". |
@@ -79,8 +79,9 @@ input instead of a line.
 
 On a real terminal, `ls` also colours its output the way GNU's `--color=auto`
 does: directories in bold blue, executables in bold green, FIFOs in yellow,
-sockets and symlinks in their own colours. Piped or redirected output is plain
-bytes, exactly as before.
+sockets and symlinks in their own colours, and arranges the short format into
+columns sized to the terminal's width. Piped or redirected output is plain
+bytes, one name per line, exactly as before.
 
 ### What `cp` and `mv` do with the awkward cases
 
@@ -177,23 +178,21 @@ without a timer.
 
 ## Deviations from GNU behavior
 
-### `ls` prints one entry per line, always
+### `ls` in columns on a real terminal
 
 The real `ls` prints in columns when its output is a terminal and one per line
 when it is piped or redirected, which is why `ls | cat` looks different from
-`ls`. Columns need the terminal width, which comes from the `TIOCGWINSZ` ioctl.
+`ls`. Columns need the terminal width, which comes from the `TIOCGWINSZ` ioctl,
+issued the same way the three raw-mode ioctls in `src/terminal/raw.rs` already
+are.
 
-This was once impossible here and no longer is: `src/terminal/raw.rs` issues
-ioctls directly for the line editor, and asking for the width would be a third
-one. Staying with one entry per line is now a choice rather than a limit. It is
-the form the host tool itself falls back to, so a side by side comparison shows
-the same names in the same order and `ls | cat` on the host matches this shell
-exactly. Columns would make that comparison depend on both terminals being the
-same width.
-
-So an auditor comparing side by side sees the same names in the same order, one
-per line instead of in columns. `ls | cat` in the host terminal produces exactly
-what `0-shell` produces.
+The short format is arranged the way GNU's own is: as many columns as fit the
+width, sized independently, filling down each column before moving on to the
+next, and only ever on a real terminal. Piped or redirected output keeps the
+one-per-line form regardless, unchanged from before, which is also the form
+the host tool itself falls back to there: a side by side comparison through
+`ls | cat` still shows the same names in the same order on both. `-l` never
+uses columns, on a real terminal or off one, which is also what GNU does.
 
 Entries are sorted by raw byte value, which is what the host tool does here and
 what GNU `ls` does under `LC_ALL=C`. A GNU `ls` running in a locale with its own

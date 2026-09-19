@@ -5,7 +5,7 @@ use crate::commands::report;
 use crate::commands::{CommandAction, dispatch};
 use crate::parser::{Direction, ParsedCommand, parse};
 use crate::signal;
-use crate::terminal::{Line, LineSource, PipedLines, Terminal};
+use crate::terminal::{self, Line, LineSource, PipedLines, Terminal};
 
 /// What the shell shows when it wants a command.
 const PROMPT: &str = "$ ";
@@ -67,11 +67,19 @@ pub fn run() -> io::Result<()> {
     // Deciding here rather than inside the loop keeps the piped path exactly
     // what it always was, which is the path the audit script takes.
     let colored = io::stdout().is_terminal();
+    let width = terminal::width();
 
     if let Some(mut terminal) = Terminal::new() {
         let stdout = io::stdout();
         let mut output = LastByte::new(stdout.lock());
-        return run_loop(&mut terminal, &mut output, &mut errors, colored, true);
+        return run_loop(
+            &mut terminal,
+            &mut output,
+            &mut errors,
+            colored,
+            width,
+            true,
+        );
     }
 
     let stdin = io::stdin();
@@ -79,22 +87,25 @@ pub fn run() -> io::Result<()> {
     let stdout = io::stdout();
     let mut output = LastByte::new(stdout.lock());
 
-    run_loop(&mut piped, &mut output, &mut errors, colored, false)
+    run_loop(&mut piped, &mut output, &mut errors, colored, width, false)
 }
 
 /// The read, parse, dispatch loop, whatever the lines are coming from.
 ///
 /// `colored` is whether standard output is a terminal. It lets `ls` match the
 /// host tool, which also colors names only when it is writing to a person.
-/// `interactive_terminal` is the same question asked of standard input: it
-/// lets `rm -i` and `mv -i` know a person is there to read an unredirected
-/// question from, rather than the shell's own script reader owning the only
-/// standard input there is.
+/// `width` is that terminal's width in columns, which the same `ls` reads to
+/// arrange its short format into columns rather than one name per line.
+/// `interactive_terminal` is the same "is a person there" question asked of
+/// standard input: it lets `rm -i` and `mv -i` know a person is there to read
+/// an unredirected question from, rather than the shell's own script reader
+/// owning the only standard input there is.
 fn run_loop<S, W, E>(
     source: &mut S,
     output: &mut LastByte<W>,
     errors: &mut E,
     colored: bool,
+    width: Option<usize>,
     interactive_terminal: bool,
 ) -> io::Result<()>
 where
@@ -167,6 +178,7 @@ where
                                 &mut file,
                                 errors,
                                 colored,
+                                width,
                                 interactive_terminal,
                             )?,
                             None => dispatch(
@@ -175,6 +187,7 @@ where
                                 output,
                                 errors,
                                 colored,
+                                width,
                                 interactive_terminal,
                             )?,
                         };
@@ -288,7 +301,7 @@ where
     let mut piped = PipedLines::new(input);
     let mut output = LastByte::new(output);
 
-    run_loop(&mut piped, &mut output, errors, false, false)
+    run_loop(&mut piped, &mut output, errors, false, None, false)
 }
 
 #[cfg(test)]
@@ -364,6 +377,7 @@ mod tests {
             &mut LastByte::new(&mut output),
             &mut errors,
             false,
+            None,
             false,
         )
         .unwrap();
@@ -395,6 +409,7 @@ mod tests {
             &mut LastByte::new(&mut output),
             &mut errors,
             false,
+            None,
             false,
         )
         .unwrap();

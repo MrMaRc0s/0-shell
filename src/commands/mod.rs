@@ -33,6 +33,7 @@ pub fn dispatch<W, E>(
     output: &mut W,
     errors: &mut E,
     colored: bool,
+    width: Option<usize>,
     interactive_terminal: bool,
 ) -> io::Result<CommandAction>
 where
@@ -92,7 +93,11 @@ where
             Ok(CommandAction::Continue)
         }
         "ls" => {
-            filesystem::ls(&command.args, output, errors, colored)?;
+            // `colored` is already this stream's own answer to "is this
+            // really a terminal", redirection included; the short format's
+            // columns follow it for the same reason GNU's do.
+            let width = if colored { width } else { None };
+            filesystem::ls(&command.args, output, errors, colored, width)?;
             Ok(CommandAction::Continue)
         }
         "touch" => {
@@ -131,7 +136,8 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        let action = dispatch(&command, None, &mut output, &mut errors, false, false).unwrap();
+        let action =
+            dispatch(&command, None, &mut output, &mut errors, false, None, false).unwrap();
 
         (
             String::from_utf8(output).unwrap(),

@@ -1,3 +1,4 @@
+mod columns;
 mod long;
 mod time;
 mod users;
@@ -77,7 +78,20 @@ pub(super) fn style_of(metadata: &Metadata, colored: bool) -> Option<&'static [u
 ///
 /// `colored` turns on GNU's name colors, and only ever for a real terminal. A
 /// piped listing and a redirected one stay byte-identical to the host tool.
-pub fn ls<W, E>(args: &[String], output: &mut W, errors: &mut E, colored: bool) -> io::Result<()>
+///
+/// `width` is the terminal's width in columns, when the short (non-`-l`)
+/// format is going to a real terminal: GNU arranges that format into as many
+/// columns as fit, down each column before moving to the next, and only ever
+/// prints one name per line when it is not talking to a person. `None` keeps
+/// the one-per-line form regardless — piped, redirected, or a terminal this
+/// system has no way to ask the width of.
+pub fn ls<W, E>(
+    args: &[String],
+    output: &mut W,
+    errors: &mut E,
+    colored: bool,
+    width: Option<usize>,
+) -> io::Result<()>
 where
     W: Write,
     E: Write,
@@ -157,6 +171,15 @@ where
                 })
                 .collect::<Vec<_>>();
             long::write(&items, false, classify, colored, output, errors)?;
+        } else if let Some(width) = width {
+            let entries = files
+                .iter()
+                .map(|(file, indicator, style)| columns::Entry {
+                    name: named(file.as_bytes(), indicator),
+                    style: *style,
+                })
+                .collect::<Vec<_>>();
+            columns::write(&entries, width, output)?;
         } else {
             for (file, indicator, style) in files {
                 if signal::is_pending() {
@@ -182,6 +205,7 @@ where
             classify,
             long,
             colored,
+            width,
             recursive,
             headers,
             &mut printed,
@@ -208,6 +232,7 @@ fn list_directory<W, E>(
     classify: bool,
     long: bool,
     colored: bool,
+    width: Option<usize>,
     recursive: bool,
     headers: bool,
     printed: &mut bool,
@@ -247,6 +272,26 @@ where
             })
             .collect::<Vec<_>>();
         long::write(&items, true, classify, colored, output, errors)?;
+    } else if let Some(width) = width {
+        let entries = names
+            .iter()
+            .map(|name| {
+                let metadata = path.join(name).symlink_metadata().ok();
+                let indicator = metadata
+                    .as_ref()
+                    .map(|metadata| indicator(metadata, classify))
+                    .unwrap_or("");
+                let style = metadata
+                    .as_ref()
+                    .and_then(|metadata| style_of(metadata, colored));
+
+                columns::Entry {
+                    name: named(name.as_bytes(), indicator),
+                    style,
+                }
+            })
+            .collect::<Vec<_>>();
+        columns::write(&entries, width, output)?;
     } else {
         for name in &names {
             if signal::is_pending() {
@@ -298,6 +343,7 @@ where
             classify,
             long,
             colored,
+            width,
             recursive,
             true,
             printed,
@@ -346,6 +392,14 @@ fn read_names(directory: &Path, all: bool) -> io::Result<Vec<OsString>> {
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
     Ok(names)
+}
+
+/// A name with its `-F` indicator appended, ready for the column layout to
+/// measure and print as one unit.
+fn named(name: &[u8], indicator: &str) -> Vec<u8> {
+    let mut named = name.to_vec();
+    named.extend_from_slice(indicator.as_bytes());
+    named
 }
 
 /// Writes one name, its `-F` indicator, and a newline, as bytes.
@@ -420,7 +474,7 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        ls(operands.as_ref(), &mut output, &mut errors, false).unwrap();
+        ls(operands.as_ref(), &mut output, &mut errors, false, None).unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -432,7 +486,29 @@ mod tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
-        ls(operands.as_ref(), &mut output, &mut errors, true).unwrap();
+        ls(operands.as_ref(), &mut output, &mut errors, true, None).unwrap();
+
+        (
+            String::from_utf8(output).unwrap(),
+            String::from_utf8(errors).unwrap(),
+        )
+    }
+
+    /// A listing as it would be drawn on a real terminal `width` columns
+    /// wide: the short format arranged into columns rather than one name per
+    /// line.
+    fn listing_at_width<W: AsRef<[String]>>(operands: W, width: usize) -> (String, String) {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+
+        ls(
+            operands.as_ref(),
+            &mut output,
+            &mut errors,
+            false,
+            Some(width),
+        )
+        .unwrap();
 
         (
             String::from_utf8(output).unwrap(),
@@ -1021,5 +1097,82 @@ sub/
             errors,
             format!("ls: cannot open directory '{root}/locked': Permission denied\n")
         );
+    }
+
+    #[test]
+    fn a_terminal_width_arranges_the_short_format_into_columns() {
+        let temp = TempDir::new("ls_columns");
+        for name in ["one", "two", "three", "four", "five", "six"] {
+            touch(&temp, name);
+        }
+
+        let (output, errors) = listing_at_width(vec![temp.arg("")], 20);
+
+        // Byte-sorted: five, four, one, six, three, two. Six and four
+        // columns both run past 20; three is the widest that still fits.
+        assert_eq!(
+            output,
+            "five  one  three\n\
+             four  six  two\n"
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_narrow_terminal_width_still_prints_one_per_line() {
+        let temp = TempDir::new("ls_columns_narrow");
+        touch(&temp, "alpha");
+        touch(&temp, "beta");
+
+        let (output, errors) = listing_at_width(vec![temp.arg("")], 1);
+
+        assert_eq!(output, "alpha\nbeta\n");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_terminal_width_does_not_touch_the_long_format() {
+        let temp = TempDir::new("ls_columns_long");
+        touch(&temp, "one");
+        touch(&temp, "two");
+
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        ls(
+            &["-l".to_string(), temp.arg("")],
+            &mut output,
+            &mut errors,
+            false,
+            Some(80),
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        // Still one row per entry: a `total` line and two rows, not a single
+        // wide one.
+        assert_eq!(output.lines().count(), 3, "{output}");
+    }
+
+    #[test]
+    fn a_terminal_width_arranges_a_recursive_listing_block_by_block() {
+        let temp = TempDir::new("ls_columns_recursive");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/sub")).unwrap();
+        touch(&temp, "tree/top.txt");
+        touch(&temp, "tree/sub/a");
+        touch(&temp, "tree/sub/b");
+        touch(&temp, "tree/sub/c");
+
+        let (output, errors) = listing_at_width(vec!["-R".to_string(), root.clone()], 6);
+
+        // The top block has two entries at one per line (together too wide
+        // for a 6-column row); `sub`'s three short entries fill two columns
+        // down first, `a` and `b` in the first and `c` alone in the second,
+        // sized to that block alone.
+        assert_eq!(
+            output,
+            format!("{root}:\nsub\ntop.txt\n\n{root}/sub:\na  c\nb\n")
+        );
+        assert!(errors.is_empty());
     }
 }
