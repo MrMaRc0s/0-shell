@@ -110,18 +110,13 @@ where
         // whole point of the flag is to say what the operand itself is, and
         // `ls -F dirlink` prints `dirlink@`.
         let path = Path::new(operand);
+        // A dangling symlink named directly is reported missing, matching
+        // GNU: the operand is followed, and there is nothing at the far end
+        // of it to describe.
         let metadata = if name_the_link {
             path.symlink_metadata()
         } else {
-            // A symlink with nothing at the end of it still names something
-            // that is there, so the link itself is described rather than
-            // reported missing. This is the host's behavior; GNU `ls` prints
-            // `cannot access` here instead.
             path.metadata()
-                .or_else(|error| match path.symlink_metadata() {
-                    Ok(metadata) => Ok(metadata),
-                    Err(_) => Err(error),
-                })
         };
 
         match metadata {
@@ -555,15 +550,22 @@ mod tests {
         let link = temp.arg("dangling");
         std::os::unix::fs::symlink(temp.arg("nowhere"), &link).unwrap();
 
-        let (named, errors) = listing(vec![link.clone()]);
+        let (named, named_errors) = listing(vec![link.clone()]);
         let (classified, _) = listing(vec!["-F".to_string(), link.clone()]);
         let (missing_output, missing_errors) = listing(vec![temp.arg("nowhere")]);
 
-        assert_eq!(named, format!("{link}\n"));
+        // Followed and found to lead nowhere, as GNU reports it: unlike `-F`
+        // and `-l`, a bare operand is expected to resolve to the file at the
+        // far end, not to the link itself.
+        assert!(named.is_empty());
+        assert_eq!(
+            named_errors,
+            format!("ls: cannot access '{link}': No such file or directory\n")
+        );
         assert_eq!(classified, format!("{link}@\n"));
-        assert!(errors.is_empty());
 
-        // A name with nothing behind it at all is still an error.
+        // A name with nothing behind it at all is still an error, worded the
+        // same way.
         assert!(missing_output.is_empty());
         assert_eq!(
             missing_errors,

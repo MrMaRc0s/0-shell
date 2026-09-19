@@ -193,10 +193,13 @@ and a timestamp past the last changeover a zone file lists, which on this system
 is in 2037, keeps the last known offset instead of applying the file's trailing
 rule.
 
-One more difference worth knowing about, this one against GNU rather than the
-host: given a symbolic link whose target is gone, `0-shell` prints the link's
-own name, as the host tool does. GNU `ls` reports
-`ls: cannot access 'name': No such file or directory` instead.
+A symbolic link named directly, with its target gone, is reported missing:
+`ls: cannot access 'name': No such file or directory`, the same wording a
+missing name gets. That is GNU's answer. The host tool installed here,
+[uutils coreutils](https://github.com/uutils/coreutils), prints the link's own
+name instead and calls it done, so a side-by-side comparison against it will
+disagree on this one case; matching real GNU is the choice that holds up
+against the tool the audit is actually worded around.
 
 ### Error messages
 
