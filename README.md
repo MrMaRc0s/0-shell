@@ -41,6 +41,9 @@ The implementation order and two-developer work split are recorded in
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 | `type`  | none | Says whether each name is one of this shell's own commands, the way bash's builtin does for one of its. With no operand it says nothing, which is also what bash does. |
 | `which` | none | The same question `type` answers, in the wording the standalone `which` uses. There is no `$PATH` to search and so no path to print: this shell runs no external program, and the honest answer is only ever "one of mine" or "not mine". |
+| `export` | none | Sets each `NAME=VALUE`, or a bare `NAME` to the empty string if it has no value yet, as an environment variable — the same one `cd` reads for `$HOME`. Rejects a name that is not a valid identifier. |
+| `unset`  | none | Removes each named environment variable. |
+| `help`   | none | Lists every command above with its own `--help` text, so the two can never disagree about what a command does. |
 
 Options may appear in any position, `--` ends option parsing, and an unknown
 option is refused (`ls: invalid option -- 'x'`) rather than taken for a

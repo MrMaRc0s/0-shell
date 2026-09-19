@@ -85,13 +85,42 @@ pub fn text(name: &str) -> Option<&'static str> {
             "Usage: which NAME...\n\
              The same question `type` answers, in `which`'s own wording.\n"
         }
+        "export" => {
+            "Usage: export NAME[=VALUE]...\n\
+             Set each NAME to VALUE, or to the empty string with none given, as an \
+             environment variable other commands can read with $NAME.\n"
+        }
+        "unset" => "Usage: unset NAME...\nRemove each NAME from the environment.\n",
+        "help" => {
+            "Usage: help\nList every command this shell answers to, each with its own usage.\n"
+        }
         _ => return None,
     })
 }
 
+/// The `help` builtin's own listing: every command's `--help` text, one after
+/// another, in the same order the command completes them.
+///
+/// This is not a separate description written by hand and left to drift from
+/// the `--help` text above; it is that same text, so the two can never
+/// disagree about what a command does.
+pub fn list() -> String {
+    let mut output = String::from("0-shell: built-in commands\n\n");
+
+    for name in crate::commands::COMMAND_NAMES {
+        output.push_str(text(name).expect("every command name has help text"));
+        output.push('\n');
+    }
+
+    // The loop above leaves one trailing blank line after the last command;
+    // drop it so the listing ends the way a single command's own text does.
+    output.pop();
+    output
+}
+
 #[cfg(test)]
 mod tests {
-    use super::text;
+    use super::{list, text};
     use crate::commands::COMMAND_NAMES;
 
     #[test]
@@ -115,5 +144,17 @@ mod tests {
     #[test]
     fn an_unknown_name_has_no_help_text() {
         assert_eq!(text("nope"), None);
+    }
+
+    #[test]
+    fn the_listing_carries_every_commands_own_usage_text() {
+        let listing = list();
+
+        for name in COMMAND_NAMES {
+            assert!(
+                listing.contains(text(name).unwrap()),
+                "{name}'s --help text is missing from the help listing"
+            );
+        }
     }
 }

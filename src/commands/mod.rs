@@ -16,9 +16,9 @@ pub use filesystem::options as command_options;
 /// offered here that `dispatch` does not know would complete to
 /// `Command 'name' not found`. Deliberately not drawn from `$PATH`, since this
 /// shell runs no external program and would be offering names it cannot run.
-pub const COMMAND_NAMES: [&str; 14] = [
-    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch", "type",
-    "which",
+pub const COMMAND_NAMES: [&str; 17] = [
+    "cat", "cd", "clear", "cp", "echo", "exit", "export", "help", "ls", "mkdir", "mv", "pwd", "rm",
+    "touch", "type", "unset", "which",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +62,18 @@ where
         }
         "cd" => {
             session::cd(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "export" => {
+            session::export(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "unset" => {
+            session::unset(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "help" => {
+            output.write_all(help::list().as_bytes())?;
             Ok(CommandAction::Continue)
         }
         "clear" => {
@@ -248,6 +260,33 @@ mod tests {
             errors.starts_with("touch: cannot touch "),
             "touch: {errors}"
         );
+        assert_eq!(action, CommandAction::Continue);
+    }
+
+    #[test]
+    fn export_and_unset_round_trip_through_the_dispatcher() {
+        let name = "ZERO_SHELL_DISPATCH_TEST_VAR";
+
+        let (_, errors, _) = run(&["export", &format!("{name}=one")]);
+        assert!(errors.is_empty(), "export: {errors}");
+        assert_eq!(std::env::var(name).unwrap(), "one");
+
+        let (_, errors, _) = run(&["unset", name]);
+        assert!(errors.is_empty(), "unset: {errors}");
+        assert!(std::env::var_os(name).is_none());
+    }
+
+    #[test]
+    fn help_lists_every_commands_usage() {
+        let (output, errors, action) = run(&["help"]);
+
+        for name in super::COMMAND_NAMES {
+            assert!(
+                output.contains(&format!("Usage: {name}")),
+                "{name}: {output}"
+            );
+        }
+        assert!(errors.is_empty());
         assert_eq!(action, CommandAction::Continue);
     }
 

@@ -67,6 +67,74 @@ where
     Ok(())
 }
 
+/// Sets each `NAME=VALUE` (or bare `NAME`, left at its current value or made
+/// empty) as an environment variable, the way the parser's `$NAME` expansion
+/// and a later `cd` or `pwd` both read it back.
+///
+/// This shell runs no subprocess, so there is no child environment to hand
+/// the variable to the way a real `export` does; setting it here is already
+/// the whole effect, since everything that reads a variable reads this same
+/// process environment.
+pub fn export<E>(args: &[String], errors: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    if args.is_empty() {
+        writeln!(errors, "export: missing operand")?;
+        return Ok(());
+    }
+
+    for arg in args {
+        match arg.split_once('=') {
+            Some((name, value)) if is_identifier(name) => {
+                // SAFETY: this shell is single-threaded and starts no other
+                // thread, so nothing else can observe this write in progress.
+                unsafe { env::set_var(name, value) };
+            }
+            None if is_identifier(arg) => {
+                if env::var_os(arg).is_none() {
+                    // SAFETY: see above.
+                    unsafe { env::set_var(arg, "") };
+                }
+            }
+            _ => writeln!(errors, "export: `{arg}': not a valid identifier")?,
+        }
+    }
+
+    Ok(())
+}
+
+/// Removes each name from the environment.
+pub fn unset<E>(args: &[String], errors: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    if args.is_empty() {
+        writeln!(errors, "unset: missing operand")?;
+        return Ok(());
+    }
+
+    for name in args {
+        // SAFETY: see `export`, above.
+        unsafe { env::remove_var(name) };
+    }
+
+    Ok(())
+}
+
+/// Whether `name` could stand after `$` in the parser's own expansion:
+/// a letter or underscore, then letters, digits, or underscores.
+fn is_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+
+    match characters.next() {
+        Some(first) if first.is_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+
+    characters.all(|character| character.is_alphanumeric() || character == '_')
+}
+
 pub fn exit<E>(args: &[String], errors: &mut E) -> io::Result<CommandAction>
 where
     E: Write,
@@ -141,7 +209,7 @@ mod tests {
     use std::env;
     use std::os::unix::ffi::OsStrExt;
 
-    use super::{change_directory, clear, echo, exit, pwd, type_of, which};
+    use super::{change_directory, clear, echo, exit, export, pwd, type_of, unset, which};
     use crate::commands::CommandAction;
     use crate::testing::WorkingDirectory;
 
@@ -235,6 +303,73 @@ mod tests {
         assert_eq!(
             String::from_utf8(errors).unwrap(),
             "cd: HOME not set\ncd: too many arguments\n"
+        );
+    }
+
+    #[test]
+    fn export_sets_a_new_variable_and_leaves_an_existing_one_alone() {
+        let mut errors = Vec::new();
+
+        export(&["ZERO_SHELL_TEST_EXPORT_A=one".to_string()], &mut errors).unwrap();
+        assert_eq!(env::var("ZERO_SHELL_TEST_EXPORT_A").unwrap(), "one");
+
+        // A bare name that already has a value is left untouched.
+        export(&["ZERO_SHELL_TEST_EXPORT_A".to_string()], &mut errors).unwrap();
+        assert_eq!(env::var("ZERO_SHELL_TEST_EXPORT_A").unwrap(), "one");
+
+        assert!(errors.is_empty());
+
+        // SAFETY: `ZERO_SHELL_TEST_EXPORT_A` is a name unique to this test, so
+        // no other test's read of it races with this cleanup.
+        unsafe { env::remove_var("ZERO_SHELL_TEST_EXPORT_A") };
+    }
+
+    #[test]
+    fn export_rejects_a_name_that_is_not_a_valid_identifier() {
+        let mut errors = Vec::new();
+
+        export(&["1NOPE=x".to_string()], &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "export: `1NOPE=x': not a valid identifier\n"
+        );
+    }
+
+    #[test]
+    fn export_without_arguments_reports_a_missing_operand() {
+        let mut errors = Vec::new();
+
+        export(&[], &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "export: missing operand\n"
+        );
+    }
+
+    #[test]
+    fn unset_removes_a_variable() {
+        // SAFETY: `ZERO_SHELL_TEST_UNSET_A` is a name unique to this test, so
+        // no other test's read of it races with this write.
+        unsafe { env::set_var("ZERO_SHELL_TEST_UNSET_A", "x") };
+        let mut errors = Vec::new();
+
+        unset(&["ZERO_SHELL_TEST_UNSET_A".to_string()], &mut errors).unwrap();
+
+        assert!(env::var_os("ZERO_SHELL_TEST_UNSET_A").is_none());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn unset_without_arguments_reports_a_missing_operand() {
+        let mut errors = Vec::new();
+
+        unset(&[], &mut errors).unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "unset: missing operand\n"
         );
     }
 
