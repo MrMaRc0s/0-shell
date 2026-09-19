@@ -46,6 +46,13 @@ Options may appear in any position, `--` ends option parsing, and an unknown
 option is refused (`ls: invalid option -- 'x'`) rather than taken for a
 filename.
 
+Every command answers `--help`, anywhere on its line, ahead of its own option
+parsing — `cp -z --help` prints usage rather than complaining about `-z`. The
+text is this shell's own: a short reminder of the flags actually implemented,
+not the page GNU's own `--help` prints. It exists mainly so the line GNU
+follows a usage mistake with is telling the truth: `cp: missing file
+operand`, then `Try 'cp --help' for more information.`.
+
 Anything else is reported as `Command 'name' not found`, and the shell carries
 on. No command aborts the shell, and a failing operand never stops the ones
 after it: `rm present missing other` removes both `present` and `other`.

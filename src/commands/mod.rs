@@ -1,4 +1,5 @@
 mod filesystem;
+mod help;
 pub(crate) mod report;
 mod session;
 
@@ -35,6 +36,17 @@ where
     W: Write,
     E: Write,
 {
+    // Checked once, ahead of every command's own option parsing, the way GNU
+    // itself notices `--help` before erroring out on anything else wrong with
+    // the arguments. A name this shell does not answer to gets no help text
+    // and falls through to the usual "not found", `--help` or not.
+    if command.args.iter().any(|arg| arg == "--help")
+        && let Some(text) = help::text(&command.name)
+    {
+        output.write_all(text.as_bytes())?;
+        return Ok(CommandAction::Continue);
+    }
+
     match command.name.as_str() {
         "echo" => {
             session::echo(&command.args, output)?;
@@ -233,6 +245,53 @@ mod tests {
     #[test]
     fn an_unknown_name_is_reported_and_the_shell_keeps_going() {
         let (output, errors, action) = run(&["something"]);
+
+        assert!(output.is_empty());
+        assert_eq!(errors, "Command 'something' not found\n");
+        assert_eq!(action, CommandAction::Continue);
+    }
+
+    #[test]
+    fn help_prints_usage_instead_of_running_the_command() {
+        let temp = TempDir::new("dispatch_help");
+
+        let (output, errors, action) = run(&["rm", "--help"]);
+
+        assert!(
+            output.starts_with("Usage: rm [-r|-R] [-f] [-i] FILE...\n"),
+            "{output}"
+        );
+        assert!(errors.is_empty());
+        assert_eq!(action, CommandAction::Continue);
+
+        // A directory named as if it were an operand is left alone: `--help`
+        // took priority and nothing beyond it was ever read as one.
+        let untouched = temp.arg("kept");
+        fs::create_dir(&untouched).unwrap();
+        run(&["rm", "-r", &untouched, "--help"]);
+        assert!(fs::metadata(&untouched).unwrap().is_dir());
+    }
+
+    #[test]
+    fn help_takes_priority_over_an_invalid_option() {
+        let (output, errors, _) = run(&["cp", "-z", "--help"]);
+
+        assert!(output.starts_with("Usage: cp "), "{output}");
+        assert!(errors.is_empty(), "an invalid flag never gets reported");
+    }
+
+    #[test]
+    fn help_still_leaves_exit_running() {
+        let (output, errors, action) = run(&["exit", "--help"]);
+
+        assert_eq!(output, "Usage: exit\nExit the shell.\n");
+        assert!(errors.is_empty());
+        assert_eq!(action, CommandAction::Continue, "the shell must not exit");
+    }
+
+    #[test]
+    fn an_unknown_name_gets_no_help_text_either() {
+        let (output, errors, action) = run(&["something", "--help"]);
 
         assert!(output.is_empty());
         assert_eq!(errors, "Command 'something' not found\n");
