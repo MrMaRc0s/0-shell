@@ -12,8 +12,9 @@ use crate::parser::ParsedCommand;
 /// offered here that `dispatch` does not know would complete to
 /// `Command 'name' not found`. Deliberately not drawn from `$PATH`, since this
 /// shell runs no external program and would be offering names it cannot run.
-pub const COMMAND_NAMES: [&str; 12] = [
-    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch",
+pub const COMMAND_NAMES: [&str; 14] = [
+    "cat", "cd", "clear", "cp", "echo", "exit", "ls", "mkdir", "mv", "pwd", "rm", "touch", "type",
+    "which",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +78,14 @@ where
         }
         "touch" => {
             filesystem::touch(&command.args, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "type" => {
+            session::type_of(&command.args, output, errors)?;
+            Ok(CommandAction::Continue)
+        }
+        "which" => {
+            session::which(&command.args, output, errors)?;
             Ok(CommandAction::Continue)
         }
         _ => {
