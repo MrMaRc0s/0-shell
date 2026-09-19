@@ -128,3 +128,72 @@ impl Drop for WorkingDirectory {
         env::set_current_dir(&self.original).expect("failed to restore the working directory");
     }
 }
+
+/// The one lock behind every test that touches `$HOME`.
+static HOME: Mutex<()> = Mutex::new(());
+
+/// Exclusive control of `$HOME`, restored on drop.
+///
+/// `$HOME` is process-wide, like the working directory above and for the same
+/// reason: a test that points it at a scratch directory — to check history
+/// persistence without touching a real person's `~/.0-shell_history` — has to
+/// hold this lock rather than race another test doing the same.
+pub struct EnvHome {
+    original: Option<std::ffi::OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl EnvHome {
+    /// Takes the lock and points `$HOME` at `path` for the life of the guard.
+    pub fn set<P>(path: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        let (guard, original) = Self::take();
+
+        // SAFETY: every reader and writer of `HOME` in this process is a test,
+        // and every one of them holds the lock above before touching it, so
+        // this is never concurrent with another thread's read of the same
+        // variable.
+        unsafe {
+            env::set_var("HOME", path.as_ref());
+        }
+
+        Self {
+            original,
+            _guard: guard,
+        }
+    }
+
+    /// Takes the lock and removes `$HOME` entirely for the life of the guard.
+    pub fn unset() -> Self {
+        let (guard, original) = Self::take();
+
+        // SAFETY: see `set`, above.
+        unsafe {
+            env::remove_var("HOME");
+        }
+
+        Self {
+            original,
+            _guard: guard,
+        }
+    }
+
+    fn take() -> (MutexGuard<'static, ()>, Option<std::ffi::OsString>) {
+        let guard = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (guard, env::var_os("HOME"))
+    }
+}
+
+impl Drop for EnvHome {
+    fn drop(&mut self) {
+        // SAFETY: see `set`, above; the same guard is still held here.
+        unsafe {
+            match &self.original {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+}

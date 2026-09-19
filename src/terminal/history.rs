@@ -1,7 +1,22 @@
 //! The lines already entered, and where the user is while browsing them.
+//!
+//! Between sessions the lines live in `$HOME/.0-shell_history`, one per line,
+//! oldest first — the same shape bash's own history file takes. A session
+//! with no `$HOME`, or a file that cannot be read or written, is not an
+//! error: history just does not survive that session, the same way it
+//! already does not survive a piped run at all.
 
-/// How many lines are kept. Old ones fall off the front.
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::PathBuf;
+
+/// How many lines are kept in memory. Old ones fall off the front.
 const CAPACITY: usize = 500;
+
+/// The name of the file a session's history is read from and appended to,
+/// inside `$HOME`.
+const FILE_NAME: &str = ".0-shell_history";
 
 /// Previously entered lines, newest last.
 #[derive(Default)]
@@ -11,20 +26,63 @@ pub struct History {
     position: Option<usize>,
     /// The half-typed line that Up was pressed on, kept so Down can give it back.
     draft: String,
+    /// The history file, open for appending, when there is one to append to.
+    file: Option<fs::File>,
 }
 
 impl History {
+    /// Reads `$HOME/.0-shell_history` into memory and keeps it open so every
+    /// later line entered this session is appended to it as it is remembered.
+    ///
+    /// This is the constructor the real terminal uses; `Default` stays a
+    /// plain in-memory history with no file behind it; a test that reaches
+    /// for one has no business touching a real person's history file.
+    pub fn load() -> Self {
+        let mut history = Self::default();
+
+        let Some(path) = history_path() else {
+            return history;
+        };
+
+        if let Ok(contents) = fs::read_to_string(&path) {
+            for line in contents.lines() {
+                history.remember_in_memory(line);
+            }
+        }
+
+        // A file that cannot be opened for appending is not fatal: the
+        // session simply stops saving, the way it already behaves when
+        // `$HOME` is not set at all.
+        history.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+
+        history
+    }
+
     /// Records a line that was just run and stops any browsing.
     ///
     /// A blank line is not worth remembering, and neither is a line identical
     /// to the one before it: holding Enter on the same command should not fill
-    /// the history with copies of it.
+    /// the history with copies of it. A line that is kept is also appended to
+    /// the history file, when this session has one open.
     pub fn remember(&mut self, line: &str) {
+        if self.remember_in_memory(line) {
+            self.save(line);
+        }
+    }
+
+    /// The in-memory half of [`Self::remember`], returning whether the line
+    /// was actually new. Used both by a live session and, without the saving
+    /// half, to replay the file [`Self::load`] just read.
+    fn remember_in_memory(&mut self, line: &str) -> bool {
         self.position = None;
         self.draft.clear();
 
         if line.trim().is_empty() || self.entries.last().is_some_and(|last| last == line) {
-            return;
+            return false;
         }
 
         if self.entries.len() == CAPACITY {
@@ -32,6 +90,18 @@ impl History {
         }
 
         self.entries.push(line.to_string());
+        true
+    }
+
+    /// Appends one line to the history file, if this session has one open.
+    ///
+    /// Best effort: a history file that stops accepting writes partway
+    /// through a session — a filled disk, a permission change — is not worth
+    /// interrupting the session over, so the failure is silently dropped.
+    fn save(&mut self, line: &str) {
+        if let Some(file) = &mut self.file {
+            writeln!(file, "{line}").ok();
+        }
     }
 
     /// The line one step further back, if there is one.
@@ -73,9 +143,21 @@ impl History {
     }
 }
 
+/// `$HOME/.0-shell_history`, or `None` when `$HOME` is not set.
+fn history_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home).join(FILE_NAME))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CAPACITY, History};
+    use std::fs;
+
+    use super::{CAPACITY, FILE_NAME, History};
+    use crate::testing::{EnvHome, TempDir};
 
     fn filled(lines: &[&str]) -> History {
         let mut history = History::default();
@@ -168,5 +250,71 @@ mod tests {
             history.previous(""),
             Some(format!("line {}", CAPACITY + 9).as_str())
         );
+    }
+
+    #[test]
+    fn a_default_history_has_no_file_behind_it() {
+        // The constructor every test above uses must never touch a real
+        // person's history file, whatever `$HOME` happens to be set to.
+        let history = History::default();
+
+        assert!(history.file.is_none());
+    }
+
+    #[test]
+    fn load_reads_previous_lines_in_order() {
+        let temp = TempDir::new("history_load");
+        let _home = EnvHome::set(temp.path());
+        fs::write(temp.path().join(FILE_NAME), "one\ntwo\nthree\n").unwrap();
+
+        let mut history = History::load();
+
+        assert_eq!(history.previous(""), Some("three"));
+        assert_eq!(history.previous(""), Some("two"));
+        assert_eq!(history.previous(""), Some("one"));
+    }
+
+    #[test]
+    fn load_with_no_file_starts_empty_but_still_saves() {
+        let temp = TempDir::new("history_load_missing");
+        let _home = EnvHome::set(temp.path());
+
+        let mut history = History::load();
+        assert_eq!(history.previous(""), None, "nothing to have loaded");
+
+        history.remember("first");
+        assert_eq!(
+            fs::read_to_string(temp.path().join(FILE_NAME)).unwrap(),
+            "first\n"
+        );
+    }
+
+    #[test]
+    fn remembering_a_line_appends_it_to_the_open_file() {
+        let temp = TempDir::new("history_save");
+        let _home = EnvHome::set(temp.path());
+        fs::write(temp.path().join(FILE_NAME), "one\n").unwrap();
+
+        let mut history = History::load();
+        history.remember("two");
+        history.remember("two"); // a repeat, which is not saved either
+        history.remember("three");
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join(FILE_NAME)).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+    }
+
+    #[test]
+    fn load_without_home_set_starts_empty_and_saves_nothing() {
+        let _home = EnvHome::unset();
+
+        let mut history = History::load();
+        history.remember("line");
+
+        // Nothing to assert on disk with no `$HOME` to hold a file, only that
+        // remembering a line without anywhere to save it does not panic.
+        assert_eq!(history.previous(""), Some("line"));
     }
 }

@@ -19,6 +19,7 @@ mod raw;
 use std::io::{self, BufRead, ErrorKind, IsTerminal, Stdin, Write};
 
 use editor::Editor;
+use history::History;
 use raw::RawMode;
 
 /// How a line of input ended.
@@ -128,7 +129,7 @@ impl Terminal {
         drop(RawMode::enter(&input).ok()?);
 
         Some(Self {
-            editor: Editor::default(),
+            editor: Editor::new(History::load()),
             input,
         })
     }

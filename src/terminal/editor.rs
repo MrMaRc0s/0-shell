@@ -15,12 +15,18 @@ use super::keys::{Key, read_key};
 use super::raw::RawMode;
 
 /// A line editor, and the history it remembers between lines.
-#[derive(Default)]
 pub struct Editor {
     history: History,
 }
 
 impl Editor {
+    /// Starts a new editor over an already-built history: loaded from
+    /// `$HOME/.0-shell_history` in real use, empty in a test that has no use
+    /// for one.
+    pub fn new(history: History) -> Self {
+        Self { history }
+    }
+
     /// Reads one line, editing it in place until Enter, Ctrl+C, or Ctrl+D.
     ///
     /// Raw mode lasts only as long as this call. A command therefore runs with

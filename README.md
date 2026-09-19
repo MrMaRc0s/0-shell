@@ -155,7 +155,14 @@ name from `$PATH` would complete to something that answers
 
 Up and Down walk through the lines entered this session, keeping the half-typed
 line so Down returns to it. Blank lines and immediate repeats are not recorded.
-History lives in memory for the session and is not written to a file.
+
+History also survives between sessions, in `$HOME/.0-shell_history`, one line
+per entry, oldest first — the same shape bash's own history file takes. A new
+session reads it in before the first prompt, and every line kept during the
+session is appended to it as it is entered, not only rewritten at exit, so a
+crash or a `kill` loses nothing already typed. A session with no `$HOME`, or a
+history file that cannot be read or written, is not an error: history simply
+does not survive it, the same way it already does not survive a piped run.
 
 ### What the editor does not do
 
