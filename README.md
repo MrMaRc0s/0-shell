@@ -220,14 +220,15 @@ against the tool the audit is actually worded around.
 
 ### Error messages
 
-Messages follow GNU's wording, with two deliberate departures.
+Messages follow GNU's wording, with one deliberate departure.
 
 The operating system's own text is used for the reason, so it stays correct in
 any locale, but Rust's errno suffix is stripped: `No such file or directory`,
 not `No such file or directory (os error 2)`.
 
-GNU follows an operand error with `Try 'cp --help' for more information.`. That
-line is left out, because this shell has no `--help` to try.
+GNU follows an operand or option error with `Try 'cp --help' for more
+information.`, and so does this shell: every command answers `--help`, so the
+line is telling the truth rather than pointing at nothing.
 
 ## Comparing against the host terminal
 

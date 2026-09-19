@@ -94,7 +94,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "mkdir: missing operand\n"
+            "mkdir: missing operand\nTry 'mkdir --help' for more information.\n"
         );
     }
 

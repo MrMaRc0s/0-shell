@@ -486,10 +486,11 @@ mod tests {
 
     #[test]
     fn reports_missing_operands() {
-        assert_eq!(run(&[]), "mv: missing file operand\n");
+        let help = "Try 'mv --help' for more information.\n";
+        assert_eq!(run(&[]), format!("mv: missing file operand\n{help}"));
         assert_eq!(
             run(&args(&["only.txt"])),
-            "mv: missing destination file operand after 'only.txt'\n"
+            format!("mv: missing destination file operand after 'only.txt'\n{help}")
         );
     }
 
@@ -609,7 +610,7 @@ mod tests {
     fn rejects_an_unknown_flag_rather_than_taking_it_for_a_filename() {
         assert_eq!(
             run(&args(&["-x", "source", "target"])),
-            "mv: invalid option -- 'x'\n"
+            "mv: invalid option -- 'x'\nTry 'mv --help' for more information.\n"
         );
     }
 

@@ -40,8 +40,9 @@
 //! `<command>: <path>: <reason>` form. The others wrap the path in plain
 //! single quotes and name the action that failed.
 //!
-//! Operand-count errors use the GNU wording, without the trailing
-//! `Try '<command> --help'` line, since this shell has no `--help`:
+//! Operand-count errors use the GNU wording, each followed by the
+//! `Try '<command> --help' for more information.` line GNU follows every
+//! usage mistake with; `crate::commands::help` is what makes that line true:
 //!
 //! * `mkdir: missing operand`
 //! * `rm: missing operand`
@@ -86,8 +87,8 @@
 //! `mv: cannot remove '<src>': <reason>`. GNU's `mv` shares its transfer code
 //! the same way and reports the same shapes.
 //!
-//! Unknown flags use the wording `getopt` produces, again without the
-//! `Try '<command> --help'` line:
+//! Unknown flags use the wording `getopt` produces, followed by the same
+//! `Try --help` line:
 //!
 //! * `cp: invalid option -- 'q'`
 //! * `cp: unrecognized option '--bogus'`

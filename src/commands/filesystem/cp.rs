@@ -768,12 +768,15 @@ mod tests {
         cp(&args(&["-q", "a", "b"]), &mut errors).unwrap();
         cp(&args(&["--bogus", "a", "b"]), &mut errors).unwrap();
 
+        let help = "Try 'cp --help' for more information.\n";
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "cp: missing file operand\n\
-             cp: missing destination file operand after 'only.txt'\n\
-             cp: invalid option -- 'q'\n\
-             cp: unrecognized option '--bogus'\n"
+            format!(
+                "cp: missing file operand\n{help}\
+                 cp: missing destination file operand after 'only.txt'\n{help}\
+                 cp: invalid option -- 'q'\n{help}\
+                 cp: unrecognized option '--bogus'\n{help}"
+            )
         );
     }
 }

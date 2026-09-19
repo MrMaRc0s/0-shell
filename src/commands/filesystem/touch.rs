@@ -185,7 +185,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "touch: missing file operand\n"
+            "touch: missing file operand\nTry 'touch --help' for more information.\n"
         );
     }
 
@@ -195,7 +195,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "touch: invalid option -- 't'\n"
+            "touch: invalid option -- 't'\nTry 'touch --help' for more information.\n"
         );
     }
 

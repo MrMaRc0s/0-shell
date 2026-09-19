@@ -883,9 +883,10 @@ sub/
         let (output, errors) = listing(args(&["-q"]));
         let (_, long) = listing(args(&["--bogus"]));
 
+        let help = "Try 'ls --help' for more information.\n";
         assert!(output.is_empty());
-        assert_eq!(errors, "ls: invalid option -- 'q'\n");
-        assert_eq!(long, "ls: unrecognized option '--bogus'\n");
+        assert_eq!(errors, format!("ls: invalid option -- 'q'\n{help}"));
+        assert_eq!(long, format!("ls: unrecognized option '--bogus'\n{help}"));
     }
 
     #[test]

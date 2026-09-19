@@ -547,7 +547,9 @@ mod tests {
         assert_eq!(output, "$ $ $ \n");
         assert_eq!(
             errors,
-            "cat: missing operand\ncat: -: No such file or directory\n"
+            "cat: missing operand\n\
+             Try 'cat --help' for more information.\n\
+             cat: -: No such file or directory\n"
         );
     }
 

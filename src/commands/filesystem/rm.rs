@@ -539,11 +539,14 @@ mod tests {
         run(&args(&["-q", "path"]), &mut errors).unwrap();
         run(&args(&["--bogus", "path"]), &mut errors).unwrap();
 
+        let help = "Try 'rm --help' for more information.\n";
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "rm: missing operand\n\
-             rm: invalid option -- 'q'\n\
-             rm: unrecognized option '--bogus'\n"
+            format!(
+                "rm: missing operand\n{help}\
+                 rm: invalid option -- 'q'\n{help}\
+                 rm: unrecognized option '--bogus'\n{help}"
+            )
         );
     }
 
