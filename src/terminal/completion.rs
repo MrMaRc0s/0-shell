@@ -1,15 +1,17 @@
 //! Working out what the half-typed word in front of the cursor could become.
 //!
 //! The first word of a line is a command, so it completes against the names
-//! this shell knows. Every other word is a path, so it completes against the
-//! filesystem. Nothing here consults `$PATH`: this shell runs no external
-//! program, so offering the name of one would be offering a command that
-//! answers `Command 'name' not found`.
+//! this shell knows. A later word starting with a dash completes against that
+//! command's own flags instead — `ls -<Tab>` offers `-l`, `-a`, `-F`, `-R` —
+//! and everything else is a path, completing against the filesystem. Nothing
+//! here consults `$PATH`: this shell runs no external program, so offering
+//! the name of one would be offering a command that answers
+//! `Command 'name' not found`.
 
 use std::fs;
 use std::path::Path;
 
-use crate::commands::COMMAND_NAMES;
+use crate::commands::{COMMAND_NAMES, command_options};
 
 /// What Tab found.
 pub struct Completion {
@@ -36,6 +38,8 @@ pub fn complete(line: &[char], cursor: usize) -> Completion {
 
     let mut matches = if is_command {
         command_matches(&word)
+    } else if word.starts_with('-') && !word.starts_with("--") {
+        flag_matches(&first_word(line), &word)
     } else {
         path_matches(&word)
     };
@@ -73,6 +77,36 @@ fn command_matches(prefix: &str) -> Vec<String> {
         .iter()
         .filter(|name| name.starts_with(prefix))
         .map(|name| format!("{name} "))
+        .collect()
+}
+
+/// The command name at the very start of the line, whatever word the cursor
+/// is actually completing right now.
+fn first_word(line: &[char]) -> String {
+    line.iter()
+        .take_while(|character| !character.is_whitespace())
+        .collect()
+}
+
+/// Flags `command` still accepts, each clustered onto `prefix` — the dash and
+/// whatever flags already follow it, `-` alone or `-l` with more to come — the
+/// way a flag cluster is typed one letter at a time. A flag already in the
+/// cluster is not offered again, so `-l` does not complete to `-ll`.
+///
+/// A name this shell does not answer to, and one that takes no flags at all
+/// (`cat`), are treated alike: nothing to offer, so the dash is left as it
+/// was typed, same as a path prefix nothing on disk begins with.
+fn flag_matches(command: &str, prefix: &str) -> Vec<String> {
+    let Some(flags) = command_options(command) else {
+        return Vec::new();
+    };
+
+    let typed: Vec<char> = prefix.chars().skip(1).collect();
+
+    flags
+        .chars()
+        .filter(|flag| !typed.contains(flag))
+        .map(|flag| format!("{prefix}{flag} "))
         .collect()
 }
 
@@ -261,5 +295,62 @@ mod tests {
         let completion = complete(&line, line.len());
 
         assert_eq!(completion.start, 4, "just past 'cat '");
+    }
+
+    #[test]
+    fn a_bare_dash_lists_the_commands_own_flags() {
+        let (word, matches) = at_end("ls -");
+
+        // No letter is settled, so the word is left as it was typed.
+        assert_eq!(word, "-");
+        assert_eq!(matches, vec!["-F ", "-R ", "-a ", "-l "]);
+    }
+
+    #[test]
+    fn a_flag_already_typed_clusters_the_rest_onto_it() {
+        let (word, matches) = at_end("ls -l");
+
+        assert_eq!(word, "-l", "no shared letter beyond what was typed");
+        assert_eq!(matches, vec!["-lF ", "-lR ", "-la "]);
+    }
+
+    #[test]
+    fn a_single_remaining_flag_is_taken_whole() {
+        // `mv` has only `-i`, so completing its one flag settles it outright.
+        let (word, matches) = at_end("mv -");
+
+        assert_eq!(word, "-i ");
+        assert_eq!(matches, vec!["-i ".to_string()]);
+    }
+
+    #[test]
+    fn a_command_with_no_flags_offers_nothing_after_a_dash() {
+        let (word, matches) = at_end("cat -");
+
+        assert_eq!(word, "-");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn flag_completion_only_applies_past_the_command_itself() {
+        // The first word starting with a dash is not completed as a flag: it
+        // is the command position, and no command name starts with one.
+        let (word, matches) = at_end("-");
+
+        assert_eq!(word, "-");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn a_double_dash_is_left_to_the_path_completer() {
+        let temp = TempDir::new("complete_double_dash");
+        let _directory = WorkingDirectory::enter(temp.path());
+
+        let (word, matches) = at_end("rm --");
+
+        // Nothing on disk starts with `--` either, so this only has to avoid
+        // offering long-option nonsense like `--r`, which this shell has none of.
+        assert_eq!(word, "--");
+        assert!(matches.is_empty());
     }
 }

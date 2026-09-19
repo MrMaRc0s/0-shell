@@ -8,6 +8,10 @@ use super::options::{self, Invalid};
 use crate::commands::report;
 use crate::signal;
 
+/// The flags `rm` accepts, also read by Tab completion so `rm -<Tab>` offers
+/// exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "rRfi";
+
 /// Removes each named path.
 ///
 /// Files are removed as they are named. A directory needs `-r` (or `-R`), which
@@ -34,7 +38,7 @@ pub fn rm<E>(
 where
     E: Write,
 {
-    let parsed = match options::parse(args, "rRfi") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("rm", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("rm", &option, errors),

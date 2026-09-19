@@ -4,6 +4,10 @@ use std::io::{self, Write};
 use super::options::{self, Invalid};
 use crate::commands::report;
 
+/// The flags `mkdir` accepts, also read by Tab completion so `mkdir -<Tab>`
+/// offers exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "p";
+
 /// Creates each named directory.
 ///
 /// A path that cannot be created is reported and the remaining operands are
@@ -16,7 +20,7 @@ pub fn mkdir<E>(args: &[String], errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    let parsed = match options::parse(args, "p") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("mkdir", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("mkdir", &option, errors),

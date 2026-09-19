@@ -23,8 +23,10 @@ where
 /// Which flags `touch` accepts. The long spelling `--no-create` is refused
 /// like every long option in this shell, and the explicit timestamps that
 /// `-t`, `-d`, and `-r` would set are not supported, so those are reported as
-/// invalid options rather than taken for filenames.
-const OPTIONS: &str = "cam";
+/// invalid options rather than taken for filenames. Also read by Tab
+/// completion so `touch -<Tab>` offers exactly what `options::parse` below
+/// actually takes.
+pub(crate) const OPTIONS: &str = "cam";
 
 /// Updates each operand the way GNU `touch` does: a missing file is created
 /// (unless `-c`), and an existing one has the requested timestamps set to now.

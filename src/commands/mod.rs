@@ -7,6 +7,9 @@ use std::io::{self, BufRead, Read, Write};
 
 use crate::parser::ParsedCommand;
 
+/// The flag letters a command accepts, for Tab completion after a dash.
+pub use filesystem::options as command_options;
+
 /// Every command name this shell answers to, for Tab completion.
 ///
 /// Kept beside `dispatch` because it has to match the arms below: a name

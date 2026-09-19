@@ -140,9 +140,12 @@ that cannot be interrupted and one that can, the escape hatch is worth more.
 
 ### Auto-completion
 
-The first word of a line completes against this shell's own command names; every
-other word completes against the filesystem. One candidate is filled in whole,
-with a trailing space, or a `/` when it is a directory so the path can be walked
+The first word of a line completes against this shell's own command names. A
+later word starting with a dash completes against that command's own flags
+instead: `ls -` offers `-l`, `-a`, `-F`, `-R`, and a flag already typed clusters
+the rest onto it, so `ls -l` next offers `-la`, `-lF`, `-lR`. Every other word
+completes against the filesystem. One candidate is filled in whole, with a
+trailing space, or a `/` when it is a directory so the path can be walked
 further. Several candidates fill in as much as they all agree on, and list
 themselves when they agree on nothing more. Hidden files stay hidden until the
 leading dot is typed.

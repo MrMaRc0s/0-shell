@@ -14,6 +14,10 @@ use crate::commands::report;
 use crate::signal;
 use long::Item;
 
+/// The flags `ls` accepts, also read by Tab completion so `ls -<Tab>` offers
+/// exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "aFlR";
+
 /// The escape sequence that ends a colored name. GNU coreutils uses `\e[0m`.
 pub(super) const RESET: &[u8] = b"\x1b[0m";
 
@@ -78,7 +82,7 @@ where
     W: Write,
     E: Write,
 {
-    let parsed = match options::parse(args, "aFlR") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),

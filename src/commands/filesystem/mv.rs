@@ -9,6 +9,10 @@ use super::{cp, rm};
 use crate::commands::report;
 use crate::signal;
 
+/// The flags `mv` accepts, also read by Tab completion so `mv -<Tab>` offers
+/// exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "i";
+
 /// Moves or renames each source operand.
 ///
 /// The last operand is the destination. When it is an existing directory each
@@ -46,7 +50,7 @@ where
     // option parser otherwise so that `-x` is refused as an option rather
     // than silently taken for a filename, and `--` keeps working for a file
     // whose name really does begin with a dash.
-    let parsed = match options::parse(args, "i") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("mv", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("mv", &option, errors),

@@ -124,3 +124,19 @@ pub use mkdir::mkdir;
 pub use mv::mv;
 pub use rm::rm;
 pub use touch::touch;
+
+/// The flag letters `command` accepts, for Tab completion to offer after a
+/// dash. `None` covers both a name this shell does not answer to and one that
+/// takes no flags at all (`cat`), which completion treats alike: nothing to
+/// offer.
+pub fn options(command: &str) -> Option<&'static str> {
+    Some(match command {
+        "cp" => cp::OPTIONS,
+        "ls" => ls::OPTIONS,
+        "mkdir" => mkdir::OPTIONS,
+        "mv" => mv::OPTIONS,
+        "rm" => rm::OPTIONS,
+        "touch" => touch::OPTIONS,
+        _ => return None,
+    })
+}

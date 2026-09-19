@@ -7,6 +7,10 @@ use super::transfer::{self, CP, Command};
 use crate::commands::report;
 use crate::signal;
 
+/// The flags `cp` accepts, also read by Tab completion so `cp -<Tab>` offers
+/// exactly what `options::parse` below actually takes.
+pub(crate) const OPTIONS: &str = "rRp";
+
 /// Copies each source operand to the destination.
 ///
 /// The last operand is the destination. When it is an existing directory each
@@ -28,7 +32,7 @@ pub fn cp<E>(args: &[String], errors: &mut E) -> io::Result<()>
 where
     E: Write,
 {
-    let parsed = match options::parse(args, "rRp") {
+    let parsed = match options::parse(args, OPTIONS) {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("cp", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("cp", &option, errors),
