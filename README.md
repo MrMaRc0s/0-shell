@@ -180,11 +180,22 @@ is no dedicated wait syscall in `src/terminal/raw.rs`; the wait polls
 sleep loop instead of adding a fifth syscall's numbers and argument layout to
 get right blind on four systems already.
 
-### What the editor does not do
+### Long lines
 
-A line longer than the terminal is wide will wrap, and the redraw does not
-track the extra rows, so a very long command can leave the display untidy
-until the next prompt.
+A line longer than the terminal is wide wraps, the way typed text always has,
+and a redraw now tracks the extra rows rather than losing the cursor to them.
+Knowing the terminal's width (the same `TIOCGWINSZ` `ls` reads for its own
+columns) turns "how many characters" into "which row and column," for both the
+whole line and the cursor's own place in it. A redraw walks back up to the
+first row of whatever it drew last time, erases from there to the end of the
+screen — covering a line that just grew *or* shrank — and draws again, ending
+by walking out to the cursor's row and column rather than trusting wherever
+the terminal parked the cursor after auto-wrapping the text just written. That
+parked position is genuinely ambiguous exactly on a row boundary — still the
+last row, one column past the last character, or already the next, empty
+one? — which is why the walk starts from a known anchor instead of trusting it.
+Without a known width — a terminal this system cannot ask, or none at all —
+the line is drawn the way it always was, as a single row.
 
 ## Deviations from GNU behavior
 
