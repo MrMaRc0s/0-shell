@@ -65,6 +65,19 @@ const TIOCGWINSZ: usize = 0x5413; // `asm-generic/ioctls.h`
 ))]
 const TIOCGWINSZ: usize = 0x4008_7468; // `sys/ttycom.h`
 
+/// The ioctl that reads how many bytes are waiting to be read, without
+/// reading them.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const FIONREAD: usize = 0x541b; // `asm-generic/ioctls.h`
+#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const FIONREAD: usize = 0x4004_667f; // `sys/filio.h`
+
 /// `SYS_ioctl`, which differs per system and architecture.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const SYS_IOCTL: usize = 16;
@@ -338,6 +351,67 @@ where
     (size.columns > 0).then_some(size.columns as usize)
 }
 
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn bytes_waiting(fd: RawFd) -> io::Result<i32> {
+    let mut count: i32 = 0;
+
+    // SAFETY: as `get_settings`, above: `FIONREAD` expects an `int` to write
+    // into, and `count` is exactly that, owned here and pointed to for the
+    // duration of the call.
+    let result = unsafe {
+        syscall3(
+            SYS_IOCTL,
+            fd as usize,
+            FIONREAD,
+            std::ptr::from_mut(&mut count) as usize,
+        )
+    };
+
+    checked(result).map(|()| count)
+}
+
+/// How often [`ready_within`] checks `FIONREAD` while it waits.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Whether a byte arrives on `fd` within `timeout`.
+///
+/// Takes the descriptor itself rather than an `AsRawFd`, unlike this module's
+/// other public functions: the one caller already has to hold the descriptor
+/// apart from its `Read` in a variable a closure can capture by value, since
+/// asking a borrowed one for its file descriptor again from inside that
+/// closure would borrow it a second time while the first was still live.
+///
+/// There is no dedicated wait syscall here — no `poll`, no `select` — because
+/// their call numbers and argument layouts add two more systems and
+/// architectures' worth of kernel trivia to get right blind, on top of the
+/// four this module already carries. Polling `FIONREAD` in a short sleep loop
+/// costs a little latency and a few wasted wakeups instead, using the one
+/// syscall this module already speaks everywhere it runs at all.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn ready_within(fd: RawFd, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        if bytes_waiting(fd).is_ok_and(|count| count > 0) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// On a system or architecture without a syscall stub here, raw mode and the
 /// terminal size are both unavailable.
 ///
@@ -361,6 +435,14 @@ where
     F: AsRawFd,
 {
     None
+}
+
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+pub fn ready_within(_fd: RawFd, _timeout: std::time::Duration) -> bool {
+    false
 }
 
 #[cfg(not(all(
@@ -427,8 +509,11 @@ impl Drop for RawMode {
 mod tests {
     use std::fs::File;
     use std::mem::{offset_of, size_of};
+    use std::os::fd::AsRawFd;
 
-    use super::{RawMode, TCGETS, TCSETS, TIOCGWINSZ, Termios, WindowSize, terminal_width};
+    use super::{
+        RawMode, TCGETS, TCSETS, TIOCGWINSZ, Termios, WindowSize, ready_within, terminal_width,
+    };
 
     #[test]
     fn a_file_is_not_a_terminal_and_says_so() {
@@ -484,5 +569,36 @@ mod tests {
         let file = File::create(temp.arg("regular")).unwrap();
 
         assert_eq!(terminal_width(&file), None);
+    }
+
+    #[test]
+    fn a_file_with_unread_bytes_left_is_ready_at_once() {
+        use std::io::Write;
+        use std::time::Duration;
+
+        let temp = crate::testing::TempDir::new("raw_ready_file");
+        let path = temp.arg("waiting");
+        File::create(&path).unwrap().write_all(b"x").unwrap();
+        let file = File::open(&path).unwrap();
+
+        // `FIONREAD` answers from the file's current position to its end, so
+        // an unread byte reports ready without the loop ever needing to sleep.
+        assert!(ready_within(file.as_raw_fd(), Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn an_exhausted_file_is_never_ready() {
+        use std::time::{Duration, Instant};
+
+        let temp = crate::testing::TempDir::new("raw_never_ready");
+        let file = File::create(temp.arg("empty")).unwrap();
+        let timeout = Duration::from_millis(20);
+
+        let started = Instant::now();
+        let ready = ready_within(file.as_raw_fd(), timeout);
+        let waited = started.elapsed();
+
+        assert!(!ready);
+        assert!(waited >= timeout, "returned before the timeout: {waited:?}");
     }
 }

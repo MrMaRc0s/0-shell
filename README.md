@@ -168,13 +168,23 @@ crash or a `kill` loses nothing already typed. A session with no `$HOME`, or a
 history file that cannot be read or written, is not an error: history simply
 does not survive it, the same way it already does not survive a piped run.
 
+### Escape, on its own
+
+Pressing Escape on its own sends one byte, indistinguishable from the start of
+an arrow key until whatever would have followed either does or does not show
+up. Resolving that needs a timer: wait a short while (25ms, long enough that a
+real escape sequence — sent in one burst by the terminal — is never split into
+two keys) for another byte, and read it as a lone Escape if none arrives. There
+is no dedicated wait syscall in `src/terminal/raw.rs`; the wait polls
+`FIONREAD`, the same ioctl call used everywhere else in that module, in a short
+sleep loop instead of adding a fifth syscall's numbers and argument layout to
+get right blind on four systems already.
+
 ### What the editor does not do
 
-A line longer than the terminal is wide will wrap, and the redraw does not track
-the extra rows, so a very long command can leave the display untidy until the
-next prompt. Pressing Escape on its own is not resolved until the next keypress,
-because a lone escape is indistinguishable from the start of an arrow key
-without a timer.
+A line longer than the terminal is wide will wrap, and the redraw does not
+track the extra rows, so a very long command can leave the display untidy
+until the next prompt.
 
 ## Deviations from GNU behavior
 

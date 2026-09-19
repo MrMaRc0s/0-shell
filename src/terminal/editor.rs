@@ -12,7 +12,14 @@ use super::Line;
 use super::completion::complete;
 use super::history::History;
 use super::keys::{Key, read_key};
-use super::raw::RawMode;
+use super::raw::{RawMode, ready_within};
+
+/// How long a lone `ESC` waits for the rest of a sequence before it gives up
+/// and resolves as an Escape on its own. Long enough that a real escape
+/// sequence, sent in one burst by the terminal, is never mistaken for two
+/// separate keys; short enough that letting go of the key does not feel like
+/// a pause.
+const ESCAPE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// A line editor, and the history it remembers between lines.
 pub struct Editor {
@@ -43,6 +50,10 @@ impl Editor {
         W: Write,
     {
         let _raw = RawMode::enter(input)?;
+        // Taken once outside the loop: a closure capturing `input` itself to
+        // ask it again would borrow it a second time while `read_key` below
+        // already holds the first.
+        let fd = input.as_raw_fd();
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor = 0usize;
@@ -50,7 +61,7 @@ impl Editor {
         render(prompt, &buffer, cursor, output)?;
 
         loop {
-            let Some(key) = read_key(input)? else {
+            let Some(key) = read_key(input, || ready_within(fd, ESCAPE_TIMEOUT))? else {
                 return Ok(Line::EndOfInput);
             };
 
