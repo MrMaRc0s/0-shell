@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, IsTerminal, Write};
 
@@ -7,8 +8,17 @@ use crate::parser::{Direction, ParsedCommand, parse};
 use crate::signal;
 use crate::terminal::{self, Line, LineSource, PipedLines, Terminal};
 
-/// What the shell shows when it wants a command.
-const PROMPT: &str = "$ ";
+/// What the shell shows when it wants a command: the current directory, so a
+/// person never has to run `pwd` just to see where they are, followed by the
+/// same `$ ` this shell has always prompted with. A directory that cannot be
+/// read — removed out from under the shell, say — falls back to `$ ` alone
+/// rather than showing a stale or empty path.
+fn prompt() -> String {
+    match env::current_dir() {
+        Ok(path) => format!("{} $ ", path.display()),
+        Err(_) => "$ ".to_string(),
+    }
+}
 
 /// A `Write` that remembers the last byte it produced.
 ///
@@ -122,7 +132,7 @@ where
             write!(output, "\r\n")?;
         }
 
-        match source.next_line(PROMPT, output)? {
+        match source.next_line(&prompt(), output)? {
             Line::EndOfInput => {
                 writeln!(output)?;
                 return Ok(());
@@ -368,6 +378,11 @@ mod tests {
             }
         }
 
+        // Held, not entered: the prompt below has to match whatever this
+        // process's actual working directory is, and nothing may change it
+        // while that is being read.
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let mut source = Drawing { first: true };
@@ -385,7 +400,7 @@ mod tests {
         // The first prompt stands in for the tail of a command's output that
         // did not end with a newline, so the second redraw moves down a row
         // first rather than drawing over it.
-        assert_eq!(output, b"$ \r\n$ \n");
+        assert_eq!(output, format!("{prompt}\r\n{prompt}\n").into_bytes());
     }
 
     #[test]
@@ -401,6 +416,8 @@ mod tests {
             }
         }
 
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
         let mut output = Vec::new();
         let mut errors = Vec::new();
 
@@ -414,22 +431,28 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(output, b"$ \n");
+        assert_eq!(output, format!("{prompt}\n").into_bytes());
     }
 
     #[test]
     fn exits_cleanly_at_end_of_input() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
         let (output, errors) = script("");
 
-        assert_eq!(output, "$ \n");
+        assert_eq!(output, format!("{prompt}\n"));
         assert!(errors.is_empty());
     }
 
     #[test]
     fn dispatches_only_after_reading_a_complete_line() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
         let (output, errors) = script("missing first\nmissing second\n");
 
-        assert_eq!(output, "$ $ $ \n");
+        assert_eq!(output, format!("{prompt}{prompt}{prompt}\n"));
         assert_eq!(
             errors,
             "Command 'missing' not found\nCommand 'missing' not found\n"
@@ -438,22 +461,34 @@ mod tests {
 
     #[test]
     fn echo_handles_quoted_and_unquoted_arguments() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
         let (output, errors) = script("echo \"something!\"\necho something else\n");
 
-        assert_eq!(output, "$ something!\n$ something else\n$ \n");
+        assert_eq!(
+            output,
+            format!("{prompt}something!\n{prompt}something else\n{prompt}\n")
+        );
         assert!(errors.is_empty());
     }
 
     #[test]
     fn exit_stops_before_later_commands_are_read() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
         let (output, errors) = script("echo before\nexit\necho after\n");
 
-        assert_eq!(output, "$ before\n$ ");
+        assert_eq!(output, format!("{prompt}before\n{prompt}"));
         assert!(errors.is_empty());
     }
 
     #[test]
     fn an_invalid_utf8_line_is_handled_and_later_lines_still_run() {
+        let _directory = WorkingDirectory::hold();
+        let prompt = super::prompt();
+
         let mut input = Cursor::new(vec![
             0xff, b'\n', b'e', b'c', b'h', b'o', b' ', b'h', b'i', b'\n',
         ]);
@@ -462,7 +497,10 @@ mod tests {
 
         run_with_io(&mut input, &mut output, &mut errors).unwrap();
 
-        assert_eq!(output, b"$ $ hi\n$ \n");
+        assert_eq!(
+            output,
+            format!("{prompt}{prompt}hi\n{prompt}\n").into_bytes()
+        );
         assert_eq!(errors, b"0-shell: line is not valid UTF-8\n");
     }
 
@@ -474,12 +512,16 @@ mod tests {
         // paths the way the command tests do.
         let temp = TempDir::new("shell_audit");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         // "Try to run the commands `mkdir new_folder1` and `mkdir new_folder2`
         // in a directory of your choice."
         let (output, errors) = script("mkdir new_folder1\nmkdir new_folder2\nls\n");
 
-        assert_eq!(output, "$ $ $ new_folder1\nnew_folder2\n$ \n");
+        assert_eq!(
+            output,
+            format!("{prompt}{prompt}{prompt}new_folder1\nnew_folder2\n{prompt}\n")
+        );
         assert!(errors.is_empty(), "{errors}");
 
         // "Using your computer's terminal, create a file named `new_doc.txt`
@@ -505,7 +547,10 @@ mod tests {
             // `cp` and `mv` say nothing when they succeed, `cat` prints the
             // text the host wrote, and `ls new_folder1` shows the copy's source
             // beside the directory that was just moved in.
-            "$ $ some text\n$ $ new_doc.txt\nnew_folder2\n$ $ $ \n"
+            format!(
+                "{prompt}{prompt}some text\n{prompt}{prompt}new_doc.txt\nnew_folder2\n\
+                 {prompt}{prompt}{prompt}\n"
+            )
         );
         assert!(errors.is_empty(), "{errors}");
 
@@ -521,10 +566,15 @@ mod tests {
     fn a_truncate_redirection_writes_the_commands_output_to_a_file() {
         let temp = TempDir::new("shell_redirect_out");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("echo hello > note.txt\nls\n");
 
-        assert_eq!(output, "$ $ note.txt\n$ \n", "prompts and the listing only");
+        assert_eq!(
+            output,
+            format!("{prompt}{prompt}note.txt\n{prompt}\n"),
+            "prompts and the listing only"
+        );
         assert!(errors.is_empty(), "{errors}");
         assert_eq!(fs::read("note.txt").unwrap(), b"hello\n");
     }
@@ -533,10 +583,14 @@ mod tests {
     fn an_append_redirection_adds_to_the_file() {
         let temp = TempDir::new("shell_redirect_append");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("echo one >> log\ncat log\necho two >> log\ncat log\n");
 
-        assert_eq!(output, "$ $ one\n$ $ one\ntwo\n$ \n");
+        assert_eq!(
+            output,
+            format!("{prompt}{prompt}one\n{prompt}{prompt}one\ntwo\n{prompt}\n")
+        );
         assert!(errors.is_empty(), "{errors}");
         assert_eq!(fs::read("log").unwrap(), b"one\ntwo\n");
     }
@@ -545,10 +599,11 @@ mod tests {
     fn a_read_redirection_feeds_cat_standard_input() {
         let temp = TempDir::new("shell_redirect_in");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("echo seed > in.txt\ncat < in.txt\n");
 
-        assert_eq!(output, "$ $ seed\n$ \n");
+        assert_eq!(output, format!("{prompt}{prompt}seed\n{prompt}\n"));
         assert!(errors.is_empty(), "{errors}");
     }
 
@@ -556,10 +611,11 @@ mod tests {
     fn cat_marks_standard_input_when_there_is_no_redirection() {
         let temp = TempDir::new("shell_cat_stdin");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("cat\ncat -\n");
 
-        assert_eq!(output, "$ $ $ \n");
+        assert_eq!(output, format!("{prompt}{prompt}{prompt}\n"));
         assert_eq!(
             errors,
             "cat: missing operand\n\
@@ -572,10 +628,15 @@ mod tests {
     fn a_redirection_that_cannot_be_opened_stops_the_command() {
         let temp = TempDir::new("shell_redirect_fail");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("echo hi > nowhere/nope\necho after\n");
 
-        assert_eq!(output, "$ $ after\n$ \n", "the second command still ran");
+        assert_eq!(
+            output,
+            format!("{prompt}{prompt}after\n{prompt}\n"),
+            "the second command still ran"
+        );
         assert!(
             errors.starts_with("0-shell: cannot create 'nowhere/nope': "),
             "{errors}"
@@ -586,10 +647,11 @@ mod tests {
     fn a_redirection_alone_still_creates_the_file() {
         let temp = TempDir::new("shell_redirect_bare");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("> empty\nls\ncat empty\n");
 
-        assert_eq!(output, "$ $ empty\n$ $ \n");
+        assert_eq!(output, format!("{prompt}{prompt}empty\n{prompt}{prompt}\n"));
         assert!(errors.is_empty(), "{errors}");
         assert!(fs::read("empty").unwrap().is_empty());
     }
@@ -598,10 +660,11 @@ mod tests {
     fn the_last_redirection_to_a_stream_wins() {
         let temp = TempDir::new("shell_redirect_last");
         let _directory = WorkingDirectory::enter(temp.path());
+        let prompt = super::prompt();
 
         let (output, errors) = script("echo only > first > final\ncat final\n");
         // `first` was created and truncated, then `final` received the output.
-        assert_eq!(output, "$ $ only\n$ \n");
+        assert_eq!(output, format!("{prompt}{prompt}only\n{prompt}\n"));
         assert!(errors.is_empty(), "{errors}");
         assert!(fs::read("first").unwrap().is_empty());
         assert_eq!(fs::read("final").unwrap(), b"only\n");

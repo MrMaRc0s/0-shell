@@ -17,8 +17,9 @@ cargo build
 ./target/debug/0-shell
 ```
 
-The shell displays `$ `, runs a command once Enter is pressed, and exits
-cleanly on `exit` or on end-of-input (Ctrl+D).
+The shell displays the current directory followed by `$ ` (`/home/you $ `),
+runs a command once Enter is pressed, and exits cleanly on `exit` or on
+end-of-input (Ctrl+D).
 
 The implementation order and two-developer work split are recorded in
 [`PLAN.md`](PLAN.md).
