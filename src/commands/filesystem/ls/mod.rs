@@ -65,7 +65,10 @@ pub(super) fn style_of(metadata: &Metadata, colored: bool) -> Option<&'static [u
 /// `-a` adds the hidden entries, `.` and `..` among them. `-F` appends the type
 /// indicator: `/` for a directory, `*` for an executable file, `@` for a
 /// symlink, `|` for a FIFO, and `=` for a socket. `-l` prints the long format,
-/// a `total` line and one aligned row per entry. The flags combine in any
+/// a `total` line and one aligned row per entry. `-R` lists every subdirectory
+/// too, depth-first, heading each one with its path the way several operands
+/// already do; a symlink to a directory is listed but not walked into, which is
+/// what keeps a cycle of links from recursing forever. The flags combine in any
 /// spelling: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same command.
 ///
 /// `colored` turns on GNU's name colors, and only ever for a real terminal. A
@@ -75,7 +78,7 @@ where
     W: Write,
     E: Write,
 {
-    let parsed = match options::parse(args, "aFl") {
+    let parsed = match options::parse(args, "aFlR") {
         Ok(parsed) => parsed,
         Err(Invalid::Short(flag)) => return report::invalid_option("ls", flag, errors),
         Err(Invalid::Long(option)) => return report::unrecognized_option("ls", &option, errors),
@@ -94,6 +97,7 @@ where
     let all = parsed.has('a');
     let classify = parsed.has('F');
     let long = parsed.has('l');
+    let recursive = parsed.has('R');
     // Both flags describe the operand itself, so neither follows a symlink
     // named on the command line.
     let name_the_link = classify || long;
@@ -138,7 +142,9 @@ where
 
     // Headers are for telling blocks apart, so one operand needs none, even
     // when the others failed: `ls missing dir` still heads the `dir` block.
-    let headers = operands.len() > 1;
+    // `-R` heads every block regardless, since a directory with subdirectories
+    // of its own is never really just the one block.
+    let headers = operands.len() > 1 || recursive;
     let mut printed = false;
 
     if !files.is_empty() {
@@ -170,56 +176,135 @@ where
             break;
         }
 
-        let path = Path::new(directory);
-        let names = match read_names(path, all) {
-            Ok(names) => names,
-            Err(error) => {
-                // Reported before any header is written, so a directory that
-                // cannot be read leaves no empty block behind.
-                let subject = format!("cannot open directory {}", report::quoted(directory));
-                report::io_error("ls", &subject, &error, errors)?;
-                continue;
+        list_directory(
+            Path::new(directory),
+            directory,
+            all,
+            classify,
+            long,
+            colored,
+            recursive,
+            headers,
+            &mut printed,
+            output,
+            errors,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Lists one directory, then, with `-R`, every real subdirectory under it.
+///
+/// `label` is what a header names: the operand as it was typed for the
+/// directory itself, and that label with each subdirectory's name joined on
+/// for everything found by recursing into it. A symlink among the entries is
+/// listed like any other name but never walked into, since a link back
+/// upward would otherwise recurse forever.
+#[allow(clippy::too_many_arguments)]
+fn list_directory<W, E>(
+    path: &Path,
+    label: &str,
+    all: bool,
+    classify: bool,
+    long: bool,
+    colored: bool,
+    recursive: bool,
+    headers: bool,
+    printed: &mut bool,
+    output: &mut W,
+    errors: &mut E,
+) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
+    let names = match read_names(path, all) {
+        Ok(names) => names,
+        Err(error) => {
+            // Reported before any header is written, so a directory that
+            // cannot be read leaves no empty block behind.
+            let subject = format!("cannot open directory {}", report::quoted(label));
+            return report::io_error("ls", &subject, &error, errors);
+        }
+    };
+
+    if *printed {
+        writeln!(output)?;
+    }
+    if headers {
+        output.write_all(label.as_bytes())?;
+        output.write_all(b":\n")?;
+    }
+    *printed = true;
+
+    if long {
+        let items = names
+            .iter()
+            .map(|name| Item {
+                display: name.as_bytes().to_vec(),
+                path: path.join(name),
+                style: None,
+            })
+            .collect::<Vec<_>>();
+        long::write(&items, true, classify, colored, output, errors)?;
+    } else {
+        for name in &names {
+            if signal::is_pending() {
+                break;
             }
-        };
 
-        if printed {
-            writeln!(output)?;
+            let entry = path.join(name);
+            let metadata = entry.symlink_metadata().ok();
+            let indicator = metadata
+                .as_ref()
+                .map(|metadata| indicator(metadata, classify))
+                .unwrap_or("");
+            let style = metadata
+                .as_ref()
+                .and_then(|metadata| style_of(metadata, colored));
+
+            write_line(name.as_bytes(), indicator, style, output)?;
         }
-        if headers {
-            output.write_all(directory.as_bytes())?;
-            output.write_all(b":\n")?;
+    }
+
+    if !recursive {
+        return Ok(());
+    }
+
+    for name in &names {
+        if signal::is_pending() {
+            break;
         }
-        printed = true;
 
-        if long {
-            let items = names
-                .iter()
-                .map(|name| Item {
-                    display: name.as_bytes().to_vec(),
-                    path: path.join(name),
-                    style: None,
-                })
-                .collect::<Vec<_>>();
-            long::write(&items, true, classify, colored, output, errors)?;
-        } else {
-            for name in names {
-                if signal::is_pending() {
-                    break;
-                }
-
-                let path = path.join(&name);
-                let metadata = path.symlink_metadata().ok();
-                let indicator = metadata
-                    .as_ref()
-                    .map(|metadata| indicator(metadata, classify))
-                    .unwrap_or("");
-                let style = metadata
-                    .as_ref()
-                    .and_then(|metadata| style_of(metadata, colored));
-
-                write_line(name.as_bytes(), indicator, style, output)?;
-            }
+        // `.` and `..` name this directory and its parent, and walking into
+        // either would recurse until the process runs out of stack.
+        if name == "." || name == ".." {
+            continue;
         }
+
+        let entry = path.join(name);
+        // `symlink_metadata` reports a symlink as a link rather than as
+        // whatever it points at, which is what leaves a linked directory
+        // listed but not descended into.
+        if !entry.symlink_metadata().is_ok_and(|entry| entry.is_dir()) {
+            continue;
+        }
+
+        let child_label = format!("{label}/{}", String::from_utf8_lossy(name.as_bytes()));
+        list_directory(
+            &entry,
+            &child_label,
+            all,
+            classify,
+            long,
+            colored,
+            recursive,
+            true,
+            printed,
+            output,
+            errors,
+        )?;
     }
 
     Ok(())
@@ -850,6 +935,84 @@ sub/
             rows[0].ends_with("\x1b[01;34msub\x1b[0m"),
             "only the name column is wrapped: {}",
             rows[0]
+        );
+    }
+
+    #[test]
+    fn recursive_descends_into_every_subdirectory() {
+        let temp = TempDir::new("ls_recursive");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/sub")).unwrap();
+        touch(&temp, "tree/top.txt");
+        touch(&temp, "tree/sub/deep.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        assert_eq!(
+            output,
+            format!("{root}:\nsub\ntop.txt\n\n{root}/sub:\ndeep.txt\n")
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_heads_a_lone_directory_even_without_subdirectories() {
+        let temp = TempDir::new("ls_recursive_flat");
+        let root = temp.arg("flat");
+        fs::create_dir(&root).unwrap();
+        touch(&temp, "flat/only.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        assert_eq!(output, format!("{root}:\nonly.txt\n"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_lists_a_linked_directory_without_walking_into_it() {
+        let temp = TempDir::new("ls_recursive_symlink");
+        let root = temp.arg("tree");
+        fs::create_dir_all(temp.arg("tree/real")).unwrap();
+        touch(&temp, "tree/real/inside.txt");
+        std::os::unix::fs::symlink("real", temp.arg("tree/link")).unwrap();
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+
+        // `link` is named in the top block like any other entry, but only
+        // `real` earns a block of its own: recursing into the link too would
+        // print `inside.txt` twice and, for a link back upward, never stop.
+        assert_eq!(
+            output,
+            format!("{root}:\nlink\nreal\n\n{root}/real:\ninside.txt\n")
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn recursive_reports_an_unreadable_subdirectory_and_continues() {
+        let temp = TempDir::new("ls_recursive_unreadable");
+        let root = temp.arg("tree");
+        let locked = temp.arg("tree/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::create_dir(temp.arg("tree/open")).unwrap();
+        touch(&temp, "tree/open/inside.txt");
+
+        let (output, errors) = listing(vec!["-R".to_string(), root.clone()]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        if errors.is_empty() {
+            // Running as root nothing is unreadable, so there is nothing to test.
+            return;
+        }
+
+        assert_eq!(
+            output,
+            format!("{root}:\nlocked\nopen\n\n{root}/open:\ninside.txt\n")
+        );
+        assert_eq!(
+            errors,
+            format!("ls: cannot open directory '{root}/locked': Permission denied\n")
         );
     }
 }

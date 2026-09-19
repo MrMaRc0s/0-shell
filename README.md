@@ -37,7 +37,7 @@ The implementation order and two-developer work split are recorded in
 | `cp`    | `-r`, `-R` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. |
 | `mv`    | none | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. |
 | `rm`    | `-r`, `-R`, `-f` | Refuses a directory without `-r`. |
-| `ls`    | `-l`, `-a`, `-F` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. |
+| `ls`    | `-l`, `-a`, `-F`, `-R` | Combinable and clusterable: `ls -l -a -F`, `ls -laF`, and `ls -al` are the same request. On a real terminal the output is coloured the way GNU's `--color=auto` is; piped output stays plain. `-R` descends into every subdirectory, heading each one with its path; a symlink to a directory is listed but not walked into. |
 | `touch` | `-c`, `-a`, `-m` | Creates a file if missing, otherwise stamps its timestamps to now. `-c` never creates, `-a` and `-m` narrow the stamping to accessed or modified time. GNU `touch`'s `-t`, `-d`, and `-r` are refused as invalid options. |
 
 Options may appear in any position, `--` ends option parsing, and an unknown
