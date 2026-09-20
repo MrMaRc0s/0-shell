@@ -16,7 +16,7 @@ mod history;
 mod keys;
 mod raw;
 
-use std::io::{self, BufRead, ErrorKind, IsTerminal, Stdin, Write};
+use std::io::{self, BufRead, ErrorKind, IsTerminal, Write};
 
 use editor::Editor;
 use history::History;
@@ -103,10 +103,14 @@ where
     }
 }
 
+use std::fs::File;
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
+
 /// Lines typed by a person, with editing, history, and completion.
 pub struct Terminal {
     editor: Editor,
-    input: Stdin,
+    input: ManuallyDrop<File>,
 }
 
 impl Terminal {
@@ -128,9 +132,14 @@ impl Terminal {
         // editor takes raw mode again, per line, when it needs it.
         drop(RawMode::enter(&input).ok()?);
 
+        // An unbuffered file descriptor for reading raw bytes one at a time.
+        // `std::io::Stdin` does internal user-space buffering, which would
+        // swallow escape sequences before `ready_within` could poll `FIONREAD`.
+        let raw_input = unsafe { ManuallyDrop::new(File::from_raw_fd(0)) };
+
         Some(Self {
             editor: Editor::new(History::load()),
-            input,
+            input: raw_input,
         })
     }
 }
@@ -140,7 +149,7 @@ impl LineSource for Terminal {
     where
         W: Write,
     {
-        self.editor.read_line(prompt, &mut self.input, output)
+        self.editor.read_line(prompt, &mut *self.input, output)
     }
 
     fn needs_fresh_line(&self) -> bool {

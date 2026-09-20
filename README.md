@@ -22,7 +22,7 @@ runs a command once Enter is pressed, and exits cleanly on `exit` or on
 end-of-input (Ctrl+D).
 
 The implementation order and two-developer work split are recorded in
-[`PLAN.md`](PLAN.md).
+[`PLAN.md`](docs/PLAN.md).
 
 ## Commands
 
@@ -34,7 +34,7 @@ The implementation order and two-developer work split are recorded in
 | `exit`  | none | Rejects any argument. |
 | `clear` | none | Clears the screen and its scrollback (past commands) and homes the cursor, so the shell is left alone at the top. Arguments are ignored. |
 | `mkdir` | `-p` | One or more directories. `-p` creates each operand's missing parents in one go and passes over a directory that already exists; without it each parent has to exist already. |
-| `cat`   | none | One or more files, streamed as raw bytes, or a redirected file read as standard input. |
+| `cat`   | none | One or more files, streamed as raw bytes; `-` or no operands reads a redirected `<` file as standard input. |
 | `cp`    | `-r`, `-R`, `-p` | Copies into an existing directory under the source's basename, or to an exact path. Several sources need a directory destination. Permission bits are always carried over; `-p` additionally carries over the access and modification times. Owner and group are not: that needs `chown`, which has no standard library binding, and without root the kernel would only refuse it. |
 | `mv`    | `-i` | Renames, or moves into an existing directory under the source's basename. Files and directories alike, no flag needed. `-i` asks before overwriting an existing destination. |
 | `rm`    | `-r`, `-R`, `-f`, `-i` | Refuses a directory without `-r`. `-i` asks before every removal, file by file even inside a recursive tree; `-f` silences it. |
@@ -48,7 +48,10 @@ The implementation order and two-developer work split are recorded in
 
 Options may appear in any position, `--` ends option parsing, and an unknown
 option is refused (`ls: invalid option -- 'x'`) rather than taken for a
-filename.
+filename. This holds for the six commands that parse options (`cp`, `mv`,
+`rm`, `ls`, `mkdir`, `touch`). `cat` takes its operands raw — `cat -- foo`
+reports `--` as a missing file — and `echo`, `pwd`, `cd`, `exit`, `clear`,
+`type`, `which`, `export`, `unset`, and `help` take no options at all.
 
 Every command answers `--help`, anywhere on its line, ahead of its own option
 parsing — `cp -z --help` prints usage rather than complaining about `-z`. The
@@ -126,7 +129,7 @@ sockets are reported as `cp: omitting special file 'name'` rather than half
 copied, since creating those nodes needs a system call the standard library
 does not expose.
 
-`mv` takes no flags. A rename moves a whole tree in one step, so there is
+`mv` takes only `-i` (ask before overwriting). A rename moves a whole tree in one step, so there is
 nothing for `-r` to switch on. A rename cannot cross a filesystem boundary, so
 when the kernel refuses for that reason (`EXDEV`) the move falls back to the
 same recursive copy `cp -r` runs, followed by the same removal `rm -r` runs.
@@ -165,13 +168,13 @@ fresh prompt. The shell does not exit. This works because raw mode turns off the
 terminal's signal generation, so Ctrl+C arrives as byte 3 for the editor to act
 on rather than as a `SIGINT` that would end the process.
 
-**While a command is running, Ctrl+C still interrupts the shell.** That is
-deliberate. Raw mode is held only while a line is being edited, so a command
-runs with the terminal exactly as the user's own shell left it. The alternative,
-holding raw mode throughout, would make the shell immortal at the cost of making
-a long `cp -r` impossible to stop: commands run in-process, not as children, so
-there is no child to signal and no cancellation point to check. Between a shell
-that cannot be interrupted and one that can, the escape hatch is worth more.
+**While a command is running, Ctrl+C interrupts the command and returns to a
+fresh prompt; the shell survives.** The shell installs its own `SIGINT`
+handler (`src/signal.rs`), which only records that the signal arrived, and the
+long-running commands (`cat`, `cp`, `mv`, `rm`, `ls`) check that flag as they
+go and stop early, so a long `cp -r` stays stoppable. Commands still run with
+the terminal exactly as the user's own shell left it — raw mode is held only
+while a line is being edited.
 
 ### Auto-completion
 
@@ -329,6 +332,12 @@ uutils writes `cat: nope.txt: No such file or directory (os error 2)` with the
 errno suffix, and `mkdir: subdir: File exists` where GNU and `0-shell` write
 `mkdir: cannot create directory 'subdir': File exists`.
 
+One long-format mark differs against GNU: `ls -lF` prints a symlink as
+`link@ -> target`, keeping the `-F` indicator, where GNU coreutils prints
+`link -> target` with no `@`. Short `ls -F` agrees with GNU on `link@`. The
+audit asks only for similar output, so this passes, but it is stated here
+rather than left for a side-by-side comparison to turn up.
+
 ## Development checks
 
 ```sh
@@ -337,8 +346,9 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
-The tests are unit tests beside the code they cover, plus one end-to-end test in
-`src/shell.rs` that drives the shell through the audit's whole script. Scratch
+The tests are unit tests beside the code they cover, plus an integration
+suite in `src/shell.rs` that drives the shell through the audit's whole
+script as well as redirection, pipes, and chaining. Scratch
 directories come from the fixture in `src/testing.rs`, which also hands out the
 single lock that every test touching the process-wide working directory has to
 hold.

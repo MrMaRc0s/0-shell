@@ -3,6 +3,38 @@
 Actions performed on the 0-shell project, newest first.
 Format: `Task # - Action - Quick Summary`
 
+## 2026-09-20
+
+### Docs - synced every doc with the verified state, no code changes
+
+- **No task - Re-validated the whole project and synced the docs.**
+  Eight parallel agents re-checked every `Audit.md` question and every
+  `ReviewFindings.md` item against code, tests, and live `/tmp` probes, plus
+  manual probes for the one agent that hit its step limit. Result: 330 tests
+  passing, `cargo fmt --check` and `cargo clippy -- -D warnings` clean, all
+  audit-functional and bonus questions passing, P0 items FIX-001..005 still
+  fixed. One agent's premise had gone stale (FIX-006: the `sigaction` handler
+  in `src/signal.rs` plus polling in `cat`/`cp`/`mv`/`rm`/`ls` now keeps the
+  shell alive through Ctrl+C mid-command, verified with `kill -INT` probes),
+  so FIX-006 is checked off and the old "deliberate limit" paragraphs are
+  rewritten in `README.md`, `AuditAnswers.md`, and `PLAN.md`. FIX-009 and
+  FIX-013 are marked half-fixed (`mkdir` parses `-p`/`--` now, `cat` still
+  takes raw operands; ESC slow path fixed, fast path still swallows).
+- **No task - Fixed the three doc bugs `ReviewFindings.md` tracked.**
+  DOC-001: the blanket "option parsing shared by every command" is now scoped
+  to the six commands that parse (`cp`, `mv`, `rm`, `ls`, `mkdir`, `touch`) in
+  `README.md` and `AuditAnswers.md`. DOC-002: `Tasks.md` no longer says Phase
+  2 is "Not started". DOC-003: the `PLAN.md` link in `README.md` now points
+  at `docs/PLAN.md`.
+- **No task - Recorded the one output deviation the re-validation found.**
+  `ls -lF` prints a symlink as `link@ -> target` where GNU coreutils 9.4
+  prints `link -> target` (short `ls -F` agrees with GNU). New LS-001 note in
+  `ReviewFindings.md`, `README.md`, and `AuditAnswers.md`. Also corrected
+  stale claims: prompt is `<cwd> $ `, pipes/redirect/prompt/history-file are
+  implemented (the "not implemented" answers predated the work), `mv` takes
+  `-i`, `cat` supports `-`/stdin, test count is 330, and the TEST-010 finding
+  text no longer says pipes are absent.
+
 ## 2026-09-18
 
 ### Bonus - redirection, colours, and raw mode on macOS

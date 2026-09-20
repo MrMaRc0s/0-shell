@@ -1,9 +1,10 @@
 # 0-shell — Validated Adversarial Review & Trackable Fix List
 
 > Sources merged & deduplicated:
-> - Set A: 4 parallel agents (functional compliance, architecture, robustness, test coverage) — 168 tests green, clippy/fmt clean.
+> - Set A: 4 parallel agents (functional compliance, architecture, robustness, test coverage) — suite green (168 tests at the time; 330 as of 2026-09-20), clippy/fmt clean.
 > - Set B: appended `Comprehensive Adversarial Audit & Validation Report` (28-Q mapping, B1–B12).
 > - Validator agent (fresh context, `ses_f54dcdb3effeaor57C8E6YDKsL`): re-checked every claim against code + safe `/tmp` probes (`printf | ./target/debug/0-shell`, `cp -r link file1`, `mv link file1` both reproduced `ELOOP` self-loop).
+> - Re-validation 2026-09-20: 8 parallel agents + manual probes. FIX-006 found fixed (`src/signal.rs` sigaction handler + polling in long ops); FIX-009/FIX-013 found half-fixed (see items); `ls -lF` symlink `@` deviation recorded (see LS-001); TEST-010 finding text corrected (pipes + redirection both shipped).
 >
 > Verdicts used: `CONFIRMED` / `PARTIALLY CONFIRMED` / `REJECTED`. Duplicates merged. This file is the single trackable list.
 
@@ -21,14 +22,14 @@
 
 ## P1 — Robustness / audit-risk
 
-- [ ] **FIX-006 P1 CONFIRMED (A2) — `Ctrl+C` during command kills shell** — `RawMode` only in `Editor::read_line` (`src/terminal/editor.rs:39`), no `sigaction` handler. Prompt-phase `^C` works; `cat /dev/zero|fifo`, `cp -r` + `Ctrl+C` dies. Documented in `README:90-96`/`AuditAnswers:422-425` but bonus Q22 expects graceful. **Fix:** install `sigaction(SIGINT)` that interrupts blocking I/O / long copy, or at minimum document as known limitation in audit briefing; add `Line::Interrupted` loop test (see TEST-010).
+- [x] **FIX-006 P1 CONFIRMED (A2) — `Ctrl+C` during command killed shell** — was true when filed: `RawMode` only in `Editor::read_line` (`src/terminal/editor.rs:39`), no `sigaction` handler. Prompt-phase `^C` worked; `cat /dev/zero|fifo`, `cp -r` + `Ctrl+C` died. **Fixed since:** `src/signal.rs` installs a `sigaction(SIGINT)` handler recording an atomic flag (`src/shell.rs:69-72` installs it at startup); the piped reader maps `EINTR` to `Line::Interrupted` (`src/terminal/mod.rs:89-91`), and long ops (`cat`, `cp`, `mv`, `rm`, `ls`) poll `signal::is_pending()` and abort early back to a fresh prompt. Re-validated 2026-09-20: `kill -INT` on a shell blocked in stdin read and mid-`cat` both survive (later commands run, rc=0). Bonus Q22 now passes; `README`/`AuditAnswers`/`PLAN` Ctrl+C-limit paragraphs updated accordingly.
 - [ ] **FIX-007 P1 PARTIALLY CONFIRMED (A3) — `cat` FIFO/device hang/flood; `cp` target-FIFO block** — `src/commands/filesystem/cat.rs:62-82` only rejects `is_dir` → `mkfifo f; cat f` hangs, `cat /dev/zero` floods. `cp` source FIFO/device already safe (`cp.rs:92-117` `omitting special file`) — prior claim of source hang REJECTED. Remaining: `cp.rs:155` `File::create(target)` blocks if target is existing FIFO. **Fix:** `symlink_metadata` + `FileTypeExt::is_fifo/is_socket/is_char_device` early-reject in `cat` (mirror `cp`), pre-check target FIFO in `cp` or `O_NONBLOCK`; tests for FIFO source/target, `/dev/null` allowed.
 - [ ] **FIX-008 P1 CONFIRMED (B8) — `EPIPE` kills shell** — `cat.rs:50` `Failure::Output → Err` → `commands/mod.rs:53 ?` → `shell.rs:46 ?` exits loop (`0-shell: Broken pipe`). Same for `ls/long` write `?`. By-design per `filesystem/mod.rs:12-17` (`Err` = stream failure) but `| head` kills shell. **Fix:** treat `ErrorKind::BrokenPipe` as `Continue` (ignore) in `run_loop`; test with failing/`BrokenPipe` writer.
-- [ ] **FIX-009 P1 CONFIRMED (A6+B9 duplicate) — `mkdir`/`cat` (and `echo/pwd/cd/exit`) ignore `--` / flags** — only `cp/mv/rm/ls` use `options::parse`. Probed: `mkdir --` creates `--/`, `mkdir -p` creates `-p/`, `cat -- foo` errors on `--`. Docs overclaim (`AuditAnswers:525`, `README:41` “shared by every command”) — validator CONFIRMED docs bug. **Fix:** `options::parse(args,"")` in `mkdir`/`cat` (strip single leading `--`, reject unknown with `invalid option`); pin `echo/pwd/cd/exit` contract explicitly; tests `mkdir_double_dash_*`, `cat_double_dash_*`, `mkdir_dash_p_rejected_or_documented`.
+- [ ] **FIX-009 P1 CONFIRMED (A6+B9 duplicate) — `mkdir`/`cat` (and `echo/pwd/cd/exit`) ignore `--` / flags — PARTIALLY FIXED 2026-09-20** — only `cp/mv/rm/ls` used `options::parse` when filed. Since fixed for `mkdir` (`mkdir.rs:23` now `options::parse(args,"p")` for `-p`; probed: `mkdir --` / `mkdir -p` → `missing operand`, no `--/` or `-p/` dir created). Still open: `cat` takes raw `args` (`cat.rs`), so `cat -- foo` errors on `--`; `echo/pwd/cd/exit` contract unpinned. Docs overclaim (`AuditAnswers:544`, `README:49-51` blanket “shared by every command”) — DOC-001 now fixed by scoping the claim to the six parsing commands. **Remaining fix:** `options::parse(args,"")` in `cat` (strip single leading `--`, reject unknown with `invalid option`); pin `echo/pwd/cd/exit` contract explicitly; tests `cat_double_dash_*`, `mkdir_dash_p_rejected_or_documented` (done: `-p` supported).
 - [ ] **FIX-010 P1 CONFIRMED (A4) — trailing `\` piped vs TTY diverges** — `PipedLines` keeps `\n` (`terminal/mod.rs:67-72`) vs `Editor` stripped (`editor.rs:41,56`); `parser.rs:43-48,78-80` makes piped `\<newline>` literal `\n` vs TTY `TrailingEscape`. **Fix:** strip trailing `\n`/`\r\n` in `PipedLines` once; test `echo hi\` both paths.
 - [ ] **FIX-011 P1 PARTIALLY CONFIRMED (B5) — cross-device `mv` merges non-empty dirs** — `cp.rs:240-243` `AlreadyExists && is_dir → merge`; `mv.rs:131-143` `EXDEV` via `cp::copy(MV,..,true)` thus merges where same-fs `rename` fails `Directory not empty` (`mv.rs:460-482`). GNU cross-device expectation unproven but divergence real. **Fix:** in `mv` EXDEV path, fail if dest exists and is non-empty dir (`Directory not empty`); test `mv_exdev_onto_nonempty_dir_fails` (guard same-fs skip explicitly).
 - [ ] **FIX-012 P1 CONFIRMED (B6) — completion breaks on quotes/spaces** — `completion.rs:63-68` `word_start` whitespace-only; `editor.rs:157` splices raw name. `cat "my<TAB>` fails; `my file.txt` completes to unquoted `my file ` → reparsed as 2 args. **Fix:** respect quotes/escapes in `word_start` (or complete unquoted prefix + re-quote with `"`/backslash); test quoted + space filenames.
-- [ ] **FIX-013 P1 CONFIRMED (B7) — lone `ESC` swallows next key (incl `Ctrl+C`)** — `keys.rs:100-146` blocks (`VMIN1/VTIME0`, `raw.rs:210-211`), `introducer != [/O → Ignored`. Documented delay (`README:121-123`) but swallowing `0x03` is bug. **Fix:** push back / handle `ESC + key` as `ESC` then key, or timeout; test `ESC, a` yields `a`, `ESC, Ctrl+C` interrupts.
+- [ ] **FIX-013 P1 CONFIRMED (B7) — lone `ESC` swallows next key (incl `Ctrl+C`) — PARTIALLY FIXED 2026-09-20** — `keys.rs:100-146` blocks (`VMIN1/VTIME0`, `raw.rs:210-211`), `introducer != [/O → Ignored`. Slow path (`ready()==false`) now returns `Ignored` without consuming (covered by test) — fixed. Fast path (`ready()==true`, introducer not `[`/`O`, e.g. `ESC,a` or `ESC,0x03` arriving <25ms) still consumes the introducer and returns `Ignored` — still swallows. **Remaining fix:** push back / handle `ESC + key` as `ESC` then key, or timeout; test `ESC, a` yields `a`, `ESC, Ctrl+C` interrupts.
 - [ ] **FIX-014 P2 CONFIRMED (A7+B10-tilde duplicate) — `exit`/`echo`/`cd`/`pwd` minor deviations (audit-safe, polish)** — `session.rs:10-15,22-25,47-60,74-79` probed: `exit 0` never exits (`too many arguments` + `Continue`); `echo -n hi` → `-n hi`; `cd -/--/~/""` → `No such file` (no `OLDPWD`/`~`/`--`); `pwd -L` rejected; `cat` no-arg `missing operand` (intentional, stdin is command stream — keep + document). **Fix (optional, disclose to auditor):** allow single numeric `exit` arg; ignore/document `echo -n/-e`; handle `cd --`, document `-`/`~` unsupported; document `cat`-stdin + `pwd`-flags choices. Tests per TEST-00x.
 
 ## P2 — Architecture / maintainability (reduce complexity)
@@ -43,7 +44,7 @@
 
 ## P1 — Test gaps (each Audit.md Q must have a test)
 
-Traceability (validator CONFIRMED): covered `F1-F7,F11,F13-F17,F19,B2/history`; partial `F8-F10,F12,F18,F20`; missing `G2,B1/F22`, triple-flag `F14`, editor loop, shell error paths. `shell.rs:128` e2e covers only `mkdir/cp/cat/mv/rm/ls` subset — insufficient alone.
+Traceability (validator CONFIRMED, re-checked 2026-09-20 at 330 tests): covered `F1-F7,F11,F13-F17,F19,B2/history`; partial `F8-F10,F12,F18,F20`; missing `G2,B1/F22`, triple-flag `F14`, editor loop, shell error paths. `shell.rs:128` e2e covers only `mkdir/cp/cat/mv/rm/ls` subset — insufficient alone.
 
 - [ ] **TEST-001 P1 — `ls -l -a -F` triple + `-laF` cluster** (`ls/mod.rs`) — currently only `-aF` (`:522`) / `-lF` (`:686`) separately. Assert triple equals three singles, contains `total`, `./`, `../`, `/`+`*` markers.
 - [ ] **TEST-002 P1 — audit navigation suite** (`shell.rs` + `session.rs`) — `mkdir parent + parent/child1,child2 + cd parent + pwd` (Q10 gap); relative `cd dir/choice + pwd` (Q11 used absolute only); bare `cd` with live manipulated `HOME` under lock + `pwd` (Q12 mocked `Some`); `cd` ENOENT/ENOTDIR/`..`/trailing-slash; `pwd` deleted-CWD branch (`session.rs:33`).
@@ -54,14 +55,18 @@ Traceability (validator CONFIRMED): covered `F1-F7,F11,F13-F17,F19,B2/history`; 
 - [ ] **TEST-007 P1 — symlinks/recursive/specials** — dangling `cp` plain (`cannot stat`) vs `cp -r` (recreate link), `mv` dangling, `rm` dangling, `cat` symlink-to-file + dangling; `cp -r` merge-into-existing (`cp.rs:243`); unreadable-tree mid-walk (`complete=false`); `cp` FIFO/socket/device `omitting special file` (zero tests); `hard_link` same-file refused; `transfer::target_for` `..`/`/` → `Invalid argument` + multi-source missing-dest OS reason (only `Not a directory` tested `cp.rs:546`, `mv.rs:447`).
 - [ ] **TEST-008 P2 — I/O / FS robustness** — `cat` binary/`>BLOCK_SIZE`/no-newline/empty/multi already exemplary — add `cp/mv` binary/large round-trip, space-in-name for `cp/mv/cat` (only `ls` sort has it), non-UTF8 `OsString` (`ls` + `pwd` bytes, zero tests), `cat` `Failure::Output` via failing writer, `ls -l` stat-fails-mid-listing (`long.rs:68` continue), `EACCES` for `cat/mkdir/mv/ls-l`.
 - [ ] **TEST-009 P2 — harness quality (flake/skip hygiene)** — convert 4 silent `return` skips to explicit `eprintln!("SKIP …: root/same-fs")`: `rm.rs:341`, `ls/mod.rs:404`, `mv.rs:300,337`; guard `mv.rs:337` with `permissions_apply` (currently fails as root, unlike siblings); fix `remove_dir_all` leak on assert-panic in `0o500` fixtures (`rm.rs:341`, `ls/mod.rs:404` restore before assert or RAII guard); add `WorkingDirectory` restore/poison test; split mega `every_filesystem_command…` (`mod.rs:105`) per-command; audit `mod.rs:168` `pwd`-without-hold race claim (validator could not reproduce — re-check under `cargo test -- --test-threads=16` before changing).
-- [ ] **TEST-010 P2 — negative bonus pins** — `echo a|b` treats `|` literally (pipe still absent); redirection is now implemented, so pin the new behaviour instead: `echo hi > f` DOES create `f`, `>>` appends, `<` feeds stdin, `> f > g` → last wins, unstoppable `> /nowhere` stops only its command (`0-shell: cannot create …`), and a bare `>` is `syntax error near unexpected token 'newline'`; prompt stays literal `$ ` (already asserted `shell.rs:93,101,115,123,140,162` — keep).
+- [ ] **TEST-010 P2 — bonus pins** — pipes AND redirection are both implemented, so pin the shipped behaviour: `echo hi > f` DOES create `f`, `>>` appends, `<` feeds stdin, `> f > g` → last wins, unstoppable `> /nowhere` stops only its command (`0-shell: cannot create …`), and a bare `>` is `syntax error near unexpected token 'newline'`; `echo a|b` pipes (no longer literal); prompt is `<cwd> $ ` with `$ ` fallback (asserted `shell.rs:93,101,115,123,140,162` — keep). (Earlier text of this item predates the pipe/redirection work and is obsolete.)
 
 ## P3 — Docs
 
-- [ ] **DOC-001 P1 CONFIRMED — fix false “shared option parsing” claim** — `docs/AuditAnswers.md:525`, `README.md:41`. Scope to `cp/mv/rm/ls` or implement FIX-009 then re-claim.
-- [ ] **DOC-002 P2 CONFIRMED — `docs/Tasks.md:3-8` stale “Phase 2 Not started”** — snapshot `854dad2`; update to shipped status.
-- [ ] **DOC-003 P3 — `README.md:24` broken `PLAN.md` link** — root has no `PLAN.md`, file is `docs/PLAN.md`.
-- [ ] **DOC-004 P2 — document intentional deviations** — `cat` stdin (`cat.rs:37-42`), `ls` one-per-line + byte-sort + `LC_ALL=C` note, `total` truncation, `TZ` rule-string→UTC + post-2037 freeze, dangling-link vs GNU, uutils-vs-GNU error suffixes, UTF-8-only limitation (until FIX-005/A8 fixed), `Ctrl+C`-during-exec limit (until FIX-006), no `~`/`-`/`$VAR` expansion (except `cd` bare `HOME`).
+- [x] **DOC-001 P1 CONFIRMED — fix false “shared option parsing” claim** — `docs/AuditAnswers.md:544`, `README.md:49-51`. Scope to `cp/mv/rm/ls/mkdir/touch` or implement FIX-009 then re-claim. → **Fixed 2026-09-20:** both scoped to the six parsing commands (`cat` documented as taking raw operands); re-check when `cat` gains `options::parse`.
+- [x] **DOC-002 P2 CONFIRMED — `docs/Tasks.md:3-8` stale “Phase 2 Not started”** — snapshot `854dad2`; update to shipped status. → **Fixed 2026-09-20:** header rewritten to shipped status (all phases done, bonus shipped).
+- [x] **DOC-003 P3 — `README.md:24` broken `PLAN.md` link** — root has no `PLAN.md`, file is `docs/PLAN.md`. → **Fixed 2026-09-20:** link now `docs/PLAN.md`.
+- [x] **DOC-004 P2 — document intentional deviations** — all points now covered in `README.md:234-339` (columns/`TIOCGWINSZ`, byte-sort/`LC_ALL=C`, `/etc/passwd|group`+LDAP blind spot, TZ rule-string→UTC + post-2037 freeze, dangling-link GNU-vs-uutils choice, errno-suffix strip, `cat`-stdin/redirect, Ctrl+C handler design, `$NAME` expansion). → **Done 2026-09-20:** the two “until FIX-xxx” parentheticals in the original text are spent (FIX-005 invalid-UTF-8 and FIX-006 Ctrl+C both fixed and documented as designed behavior, not limits), and `$VAR` expansion is implemented (`export`/`unset`), so that sub-point is moot. (Original text: `cat` stdin (`cat.rs:37-42`), `ls` one-per-line + byte-sort + `LC_ALL=C` note, `total` truncation, `TZ` rule-string→UTC + post-2037 freeze, dangling-link vs GNU, uutils-vs-GNU error suffixes, UTF-8-only limitation (until FIX-005/A8 fixed), `Ctrl+C`-during-exec limit (until FIX-006), no `~`/`-`/`$VAR` expansion (except `cd` bare `HOME`).)
+
+## Known output deviations (disclose to auditor, not tracked as bugs)
+
+- **LS-001 — `ls -lF` marks symlinks `name@ -> target`, GNU prints `name -> target`.** Confirmed 2026-09-20 against GNU coreutils 9.4 (`src/commands/filesystem/ls/mod.rs` classify path + `long.rs:88-90`): short `ls -F` agrees with GNU on `name@`, but the long format keeps the `@` before ` -> target` where GNU drops it. Audit asks only for "similar" output, so this passes, but say it first: `README.md` and `docs/AuditAnswers.md` now record it.
 
 ## Rejected / overstated (do NOT track as bugs)
 
@@ -76,11 +81,11 @@ Traceability (validator CONFIRMED): covered `F1-F7,F11,F13-F17,F19,B2/history`; 
 
 ## Suggested order
 
-1. `FIX-001, FIX-002` (data loss) + tests.
-2. `FIX-003, FIX-004, FIX-005` (crash/DoS) + tests.
-3. `FIX-009` + `DOC-001` (docs lie about flags — auditor-visible).
+1. `FIX-001, FIX-002` (data loss) + tests. — done.
+2. `FIX-003, FIX-004, FIX-005` (crash/DoS) + tests. — done.
+3. `FIX-006` (Ctrl+C) — done 2026-09-20; `FIX-009` remainder (`cat` flags) + `DOC-001` (docs fixed by scoping; code side of `cat` still open).
 4. `TEST-001 → TEST-005` (triple flags, nav suite, purity, Ctrl+C/D, shell errors) — closes audit-Q gaps.
-5. `FIX-007, FIX-008, FIX-010 → FIX-014`, `ARCH-001 → ARCH-007`, `TEST-006 → TEST-010`, `DOC-002 → DOC-004`.
+5. `FIX-007, FIX-008, FIX-010 → FIX-014`, `ARCH-001 → ARCH-007`, `TEST-001 → TEST-010` (TEST-010 partially covered by existing redir/pipe tests — still needs explicit pins).
 
 ---
 
@@ -114,5 +119,5 @@ developed on macOS, where they did, and are now fixed:
   matching the project's GNU-targeting charter.
 
 Verification of the whole session (this branch): `cargo fmt --check`, `cargo
-clippy -- -D warnings`, and `cargo test` — 212 passing. P0 items FIX-001..005
-are checked off above.
+clippy -- -D warnings`, and `cargo test` — 330 passing as of 2026-09-20 (212 at the time this was written). P0 items FIX-001..005
+are checked off above, and FIX-006 since.

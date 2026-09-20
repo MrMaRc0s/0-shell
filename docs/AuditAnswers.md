@@ -17,7 +17,7 @@ matches it exactly.
 
 **Question:** Was the project written in Rust?
 
-**Answer:** Yes. The whole project is Rust: `Cargo.toml`, and 25 `.rs` files
+**Answer:** Yes. The whole project is Rust: `Cargo.toml`, and 31 `.rs` files
 under `src/`. It builds with `cargo build` and needs nothing else. `Cargo.toml`
 declares no dependencies at all, and `Cargo.lock` holds exactly one package,
 this one, so every behaviour below is written here or comes from the Rust
@@ -78,8 +78,8 @@ process.
 
 **Answer:** Yes. `./target/release/0-shell` starts, prints its prompt, and reads
 commands until told to stop. It runs the required command set (`echo`, `pwd`,
-`cd`, `exit`, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, plus `touch` and `clear`
-added on the `devcemv` branch), reports anything else as
+`cd`, `exit`, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, plus `touch`, `clear`,
+`type`, `which`, `export`, `unset`, and `help`), reports anything else as
 an unknown command, and keeps going after every error.
 
 ---
@@ -87,9 +87,12 @@ an unknown command, and keeps going after every error.
 **Question:** Can you confirm that this interpreter displays at least a simple
 `$` and waits for you to type a command?
 
-**Answer:** Yes. The prompt is `$ `, a dollar sign and one space, written and
-flushed before each read. Attached to a real terminal the first thing it emits
-is exactly `'$ '`, and it then blocks waiting for input.
+**Answer:** Yes. The prompt is the current directory followed by `$ `
+(`/home/you $ `), falling back to a bare `$ ` when the working directory
+cannot be read. It is written and flushed before each read, and the shell
+then blocks waiting for input. This is a superset of the plain `$ ` the
+subject asks for: the current directory is a bonus feature, and the trailing
+`$ ` is still there.
 
 ---
 
@@ -98,7 +101,9 @@ you press enter?
 
 **Answer:** Yes. The shell reads whole lines, so nothing runs until Enter is
 pressed. Driven through a real pseudo-terminal, typing `pwd` and waiting
-produced only the terminal's own echo of the three characters and no execution:
+produced only the terminal's own echo of the three characters and no execution
+(transcript from when the prompt was still a bare `$ `; the current prompt
+prefixes the working directory, but the Enter-gating is unchanged):
 
 ```
 prompt on start:                    '$ '
@@ -114,8 +119,8 @@ The directory is printed only after Enter.
 back the parent's shell? (`exit`)
 
 **Answer:** Yes. `exit` stops the loop and the process ends with status code 0,
-so the parent shell takes over cleanly. Verified over a pseudo-terminal:
-`exit` produced `'$ exit\r\n'` and exit code 0.
+so the parent shell takes over cleanly. Verified over a pseudo-terminal
+(`exit` produced the echoed line and exit code 0).
 
 `exit` takes no arguments. `exit now` reports `exit: too many arguments` and the
 shell keeps running, rather than quitting on a command it did not understand.
@@ -221,17 +226,16 @@ shell reports `cd: HOME not set` rather than guessing.
 same in your computer terminal. Can you confirm that the output is similar in the
 project and in your computer terminal?
 
-**Answer:** Yes, and byte for byte rather than merely similar, with one
-presentation difference worth stating plainly.
+**Answer:** Yes, and byte for byte rather than merely similar when compared
+the way the host tool itself falls back to — with one presentation
+difference and one mark difference, both stated plainly below.
 
-**`0-shell` prints one entry per line, always.** The real `ls` prints in columns
-when its output is a terminal and one per line when it is piped, which is why
-`ls | cat` looks different from `ls`. Choosing columns means knowing the
-terminal width, and the only way to ask is the `TIOCGWINSZ` ioctl, which needs a
-C binding this project has no dependency for. Rather than guess a width and
-print columns that line up with nothing, the shell prints the form the host tool
-itself falls back to. So `ls | cat` in your terminal gives exactly what
-`0-shell` gives.
+**Columns.** On a real terminal `0-shell` arranges the short format into
+columns sized to the terminal width (via `TIOCGWINSZ`), the way GNU's own
+`ls` does. Piped or redirected output stays one entry per line, which is
+also the form the host tool falls back to there. So `ls | cat` in your
+terminal gives exactly what `0-shell` gives, and that is the comparison to
+make for the audit.
 
 Compared that way, on a directory holding a file, a log, a symlink, an
 executable, a dotfile, and a subdirectory:
@@ -253,7 +257,8 @@ value, which is what the host does here and what GNU `ls` does under `LC_ALL=C`.
 Do the same in your computer terminal. Can you confirm that the output is similar
 in the project and in your computer terminal?
 
-**Answer:** Yes, byte for byte identical. Same directory as above:
+**Answer:** Yes — similar, with one mark worth stating plainly (see below).
+Same directory as above:
 
 ```
 total 16
@@ -275,6 +280,12 @@ target, with the `total` header and every column aligned to its widest value.
 The flags combine in any spelling. `ls -l -a -F`, `ls -laF`, `ls -al`, and
 `ls -aFl` all produce the same output, and an unknown flag is refused with
 `ls: invalid option -- 'x'` rather than treated as a filename.
+
+One mark differs against GNU coreutils: the listing above shows
+`lnk@ -> a.txt`, keeping the `-F` symlink indicator in the long format,
+where GNU prints `lnk -> a.txt` with no `@`. Short `ls -F` agrees with GNU
+on `lnk@`. The audit asks only for similar output, so this passes, but it is
+stated here rather than left for a side-by-side comparison to turn up.
 
 `ls -l` was checked well past this small directory, all byte identical to the
 host: `/dev`, which exercises the `major, minor` column for device files;
@@ -385,7 +396,9 @@ error, never a silent no-op, and `rm -r /` and `rm -r .` are refused outright.
 shell exit gracefully and return control to the parent shell?
 
 **Answer:** Yes. Tested by sending a real Ctrl+D keypress over a
-pseudo-terminal, both at an empty prompt and after running a command:
+pseudo-terminal, both at an empty prompt and after running a command
+(prompts shown bare, as at the time; the current prompt prefixes the working
+directory):
 
 ```
 Ctrl+D at an empty prompt:  output '$ \r\n',            exit code 0
@@ -415,9 +428,10 @@ command rather than exiting.
 
 **Question:** Did the student handle `Ctrl + C` gracefully?
 
-**Answer:** Yes, at the prompt, which is where it matters. Pressing Ctrl+C
+**Answer:** Yes — at the prompt and while a command is running. Pressing Ctrl+C
 while typing prints `^C`, throws the half-typed line away, and returns a fresh
-prompt. The shell does not exit.
+prompt. Interrupting a running command stops that command and returns to a
+fresh prompt. The shell does not exit in either case.
 
 Verified over a pseudo-terminal, checking the process itself rather than the
 screen, since a terminal echoes typed characters even after the program behind
@@ -426,18 +440,17 @@ it has died:
 ```
 Ctrl+C at an empty prompt         -> shell alive
 Ctrl+C with a half-typed line     -> shell alive
-Ctrl+C while a command is running -> shell exits (signal 2)
+Ctrl+C while a command is running -> command stops, shell alive
 ```
 
-The third line is a deliberate limit and is stated rather than hidden. The
-shell takes the terminal into raw mode only while a line is being edited, which
-is what stops the kernel turning Ctrl+C into a `SIGINT`; a command then runs
-with the terminal as the user's own shell left it. Holding raw mode throughout
-would make the shell survive that case too, at the price of making a long
-`cp -r` impossible to stop, because commands here run in-process rather than as
-child processes: there is no child to signal and no cancellation point to poll.
-Between a shell that cannot be interrupted and one that can, the escape hatch
-was judged worth more.
+How it works: at the prompt, raw mode turns off the terminal's signal
+generation, so Ctrl+C arrives as byte 3 for the editor to act on. During a
+command the terminal is exactly as the user's own shell left it, so Ctrl+C
+arrives as a real `SIGINT` — and the shell installs its own handler for it
+(`src/signal.rs`), which only records that the signal arrived. The
+long-running commands (`cat`, `cp`, `mv`, `rm`, `ls`) check that flag as they
+go and stop early, so a long `cp -r` stays stoppable while the shell itself
+survives.
 
 No external program is involved. Terminal modes are set with the `TCSETS`
 ioctl, issued directly in `src/terminal/raw.rs`; `stty` would have been the easy
@@ -474,8 +487,16 @@ offering a name from `$PATH` would be offering a command that answers
 
 **Question:** Did the student implement piping?
 
-**Answer:** No. Not implemented, and out of scope per `PLAN.md`. Each line is one
-command; `|` is passed through as an ordinary argument.
+**Answer:** Yes. `|` connects one command's output to the next command's
+input — `ls -l | cat`, `cat file | cat` — with no process, and so no real
+pipe, on the other end of it: the shell captures a stage's whole output
+before the next stage reads any of it, which is invisible except to a command
+that would otherwise have started producing output before its input was
+ready. `;` and `|` combine on one line (`ls | cat ; echo done`), both are
+recognised only outside quotes, and a stage's own `<` or `>`/`>>` wins over
+the pipe either side of it. Only the last unredirected stage reaches the
+terminal and is ever coloured. `echo a|b` pipes; a `|` inside quotes stays
+literal.
 
 ---
 
@@ -508,23 +529,28 @@ apply left to right, and a stray `>` with no destination is a parse error
 
 **Question:** Did the student display the current directory in the prompt?
 
-**Answer:** No. The prompt is the plain `$ ` the subject asks for, kept that way
-so it matches what the audit expects to see.
+**Answer:** Yes. The prompt is the current directory followed by `$ `
+(`/home/you $ `), falling back to a bare `$ ` when the working directory
+cannot be read.
 
 ---
 
 **Question:** Did the student add any other features or commands to the project?
 
-**Answer:** Two extra commands were added on the `devcemv` branch — `touch`
-(create a file if missing, otherwise stamp its timestamps, with GNU's `-c`,
-`-a`, and `-m`) and `clear` (reset the screen and its scrollback) — alongside
-two further bonuses from the subject's list, and the required commands go
-beyond the minimum in several places.
+**Answer:** Several. `clear` resets the screen and its scrollback; `touch`
+creates a file if missing and otherwise stamps its timestamps (`-c`, `-a`,
+`-m`); `type` and `which` say whether a name is one of this shell's own
+commands; `export`/`unset` manage environment variables with `$NAME` and
+`${NAME}` expansion everywhere but inside single quotes; `help` lists every
+command with its `--help` text. Beyond commands: `;` chaining, pipes (`|`),
+redirection (`>`, `>>`, `<`), `ls -R`, `cp -r`/`-R`/`-p`, `mv`/`rm -i`, and
+global `--help` on every command.
 
 **Command history.** Up and Down walk through the lines entered this session.
 The half-typed line is kept when the walk starts, so Down returns to it. Blank
-lines and immediate repeats are not recorded. History is held in memory for the
-session and not written to a file.
+lines and immediate repeats are not recorded. History also survives between
+sessions in `$HOME/.0-shell_history`, one line per entry, oldest first — the
+same shape bash's own history file takes.
 
 **A line editor.** Left and Right, Home and End (also Ctrl+A and Ctrl+E),
 Backspace and Delete, and Ctrl+U to clear the line. Ctrl+D ends the shell only
@@ -535,16 +561,21 @@ from UTF-8 and edit as single characters rather than as bytes.
 All of this applies only when the input really is a terminal. Piped or
 redirected input takes the plain reading path, so scripts, the test suite, and
 the audit's own transcript are byte for byte what they were before any of it
-existed. Two known limits: a line longer than the terminal is wide will wrap and
-untidy the redraw, and a lone Escape keypress is not resolved until the next
-key, being indistinguishable from the start of an arrow key without a timer.
+existed. Two former limits are handled: a line longer than the terminal wraps
+with the cursor tracked across rows (via `TIOCGWINSZ`), and a lone Escape is
+resolved with a short 25 ms wait for a following byte (see `README.md`). One
+limit remains, tracked as FIX-013: an Escape arriving in the same burst as the
+next key can still swallow it.
 
 The required commands also go beyond the minimum:
 
-* **Option parsing shared by every command.** Flags work in any position, cluster
+* **Option parsing shared by the six commands that take options** (`cp`, `mv`,
+  `rm`, `ls`, `mkdir`, `touch`). Flags work in any position, cluster
   (`ls -laF`), tolerate repeats, and stop at `--`, so a file genuinely named
   `-r` is reachable as `mv -- -r target`. An unknown flag is refused
   (`ls: invalid option -- 'x'`) instead of being taken for a filename.
+  `cat` takes its operands raw, and `echo`, `pwd`, `cd`, `exit`, `clear`,
+  `type`, `which`, `export`, `unset`, and `help` take no options.
 * **`mkdir -p`,** which creates each operand's missing parents in one go and,
   unlike a plain `mkdir`, silently passes over a directory that already exists.
   Added on the `devcemv` branch.
@@ -564,5 +595,5 @@ The required commands also go beyond the minimum:
   removes both `present` and `other`. This was tested deliberately against
   missing operands, nonexistent paths, permission-denied paths, a file where a
   directory belongs, unclosed quotes, very long input, and binary files.
-* **212 automated tests**, including one that drives the shell through this
+* **330 automated tests** (2026-09-20), including one that drives the shell through this
   audit's entire script and checks the result.

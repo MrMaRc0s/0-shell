@@ -56,6 +56,20 @@ After both parts are complete:
 
 ## Bonus backlog
 
+Status 2026-09-20: all of the backlog below is implemented. The three
+original items (Ctrl+C, auto-completion, history) plus everything once
+listed as out of scope: a current-directory prompt (`<cwd> $ `), command
+chaining (`;`), pipes (`|`), environment-variable expansion (`export`,
+`unset`, `$NAME`), `help` (plus `clear`, `touch`, `type`, `which`), colours,
+and redirection (`>`, `>>`, `<`). Two refinements since: history is also
+written to `$HOME/.0-shell_history` between sessions, and Ctrl+C during a
+running command now interrupts the command and keeps the shell, via a
+`sigaction` handler plus polling in the long-running commands, rather than
+ending the process. Remaining work is robustness hardening, tracked in
+`ReviewFindings.md`, not missing features.
+
+Original backlog text, kept for history:
+
 Three of the optional features are implemented, all resting on the same piece of
 work: at a terminal the shell reads a line itself instead of letting the kernel do it.
 

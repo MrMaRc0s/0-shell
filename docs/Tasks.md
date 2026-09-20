@@ -1,10 +1,27 @@
 # 0-Shell - Remaining Tasks
 
-Status snapshot (as of commit `854dad2`):
+Status (updated 2026-09-20, 330 tests passing):
 
-- **Done:** shell loop and prompt, Ctrl+D/EOF exit, line parser (quotes + escapes),
+- **Done:** everything below. Shell loop and prompt (now `<cwd> $ `), Ctrl+D/EOF
+  exit, line parser (quotes + escapes), unknown-command message, `echo`, `pwd`,
+  `cd`, `exit`, all filesystem commands (`ls` incl. `-l`/`-a`/`-F`/`-R`,
+  `cat`, `cp` incl. `-r`/`-R`/`-p`, `rm` incl. `-r`/`-R`/`-f`/`-i`,
+  `mv` incl. `-i` and the `EXDEV` fallback, `mkdir` incl. `-p`),
+  dispatcher registration, unit tests for all of them, the end-to-end audit
+  test, the stability sweep, and the README.
+- **Done (bonus):** Ctrl+C (prompt and during-command, via a `sigaction`
+  handler), auto-completion, history (memory + `$HOME/.0-shell_history`),
+  current-directory prompt, colorized `ls`, `;` chaining, pipes, redirection,
+  environment variables (`export`/`unset`, `$NAME` expansion), `help`, and
+  extra commands (`clear`, `touch`, `type`, `which`).
+- **Still open:** the hardening list in `ReviewFindings.md` (FIX-007/008,
+  remainder of FIX-009/013/014, ARCH-001..007, TEST-001..009).
+
+Original snapshot (as of commit `854dad2`), kept for history:
+
+- **Done at the time:** shell loop and prompt, Ctrl+D/EOF exit, line parser (quotes + escapes),
   unknown-command message, `echo`, `pwd`, `cd`, `exit`, plus unit tests for all of them.
-- **Not started:** every filesystem command (`ls`, `cat`, `cp`, `rm`, `mv`, `mkdir`),
+- **Not started at the time:** every filesystem command (`ls`, `cat`, `cp`, `rm`, `mv`, `mkdir`),
   their dispatcher registration, and the final integration/audit pass.
 
 The numbering below is roughly the recommended order.
@@ -56,7 +73,8 @@ A small helper for "no operands given" (`mkdir: missing operand`) and for turnin
 - Preserve file permissions where practical; report unreadable sources without crashing.
 - Decide and document whether `cp -r` for directories is in scope (the subject says
   "files and directories as required by normal Unix `cp` behavior"; the audit only exercises
-  the file case, so `-r` is a low-priority extra).
+  the file case, so `-r` is a low-priority extra). Update 2026-09-20: decided —
+  `-r`/`-R` are in scope and implemented, including the symlink rule.
 
 ### 7. Implement `mv`
 - Rename within the same filesystem via `std::fs::rename`.
@@ -169,11 +187,13 @@ permission-denied paths (e.g. `/root`), unclosed quotes, very long input, `cd` i
 Describe the finished command set and any documented deviations from GNU behavior
 (e.g. the `ls` column decision from task 9, whether `cp -r` is supported).
 
-### 24. Decide the bonus question
-`PLAN.md` currently declares the whole bonus backlog out of scope. If that still holds,
-nothing to do. If any bonus is wanted, the cheapest wins for audit points are the
-current-directory prompt and colorized output; Ctrl+C handling and pipes are the expensive
-ones.
+### 24. Decide the bonus question — decided and shipped (2026-09-20)
+`PLAN.md` once declared the whole bonus backlog out of scope. That no longer
+holds: the cheapest wins (current-directory prompt, colorized output) and the
+expensive ones (Ctrl+C handling incl. during-command, pipes) are all
+implemented, plus history, chaining, redirection, environment variables, and
+`help`. Nothing in the subject forbids them. See `ReviewFindings.md` for the
+remaining hardening items, which are robustness work, not missing features.
 
 ---
 
