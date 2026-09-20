@@ -70,6 +70,18 @@ The forbidden thing would have been to run `stty`, which is the easy way to set
 these bits and would have been an external binary. Nothing here creates a
 process.
 
+**CORRECTION (check manually, then remove the wrong paragraph above):**
+That last one is not the only `unsafe` or the only assembly. The project has
+inline assembly (`std::arch::asm!`) in two files: `src/terminal/raw.rs`, which
+issues the `ioctl` system call for raw mode, the terminal width, and the escape
+wait; and `src/signal.rs`, which issues `sigaction` (`rt_sigaction` on Linux) to
+install the Ctrl+C handler. Both cover x86_64 and aarch64 on Linux and macOS,
+each with a documented safety note. `unsafe` also appears in
+`src/commands/session.rs` (`env::set_var` / `env::remove_var` for `export` and
+`unset`), `src/parser.rs`, and `src/terminal/mod.rs`. Check with:
+`grep -rn 'asm!' src` and `grep -rn 'unsafe' src`. The argument is unchanged: a
+system call is not a spawned program, and nothing here creates a process.
+
 ---
 
 ## Functional

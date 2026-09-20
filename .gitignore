@@ -9,6 +9,8 @@
 # ...except the top-level docs and anything under DOCs/
 !README.md
 !Exercise.md
+!0shell-audit-guide.md
+!Audit_Answers_Old.md
 !Audit.md
 !AuditAnswers.md
 !Tasks.md
